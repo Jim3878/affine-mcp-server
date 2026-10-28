@@ -9269,6 +9269,16 @@ export function registerDocTools(
     column.set("data", toYValue(spec.data));
     columns.push([column]);
 
+    // A view lists only some columns; AFFiNE shows unlisted ones after the listed ones. Databases
+    // made by append_block list none, so list the title column first or new columns go before it.
+    // Without a "title" column definition, the editor's built-in title column has the id "title".
+    const titleColumn = readColumnDefs(dbBlock).find(col => col.type === "title" && col.id !== columnId);
+    const titleEntry = spec.type === "title"
+      ? null
+      : { id: titleColumn?.id ?? "title", hide: false, width: Number(titleColumn?.raw?.get?.("width")) || 200 };
+    const listsTitle = (entries: unknown[]) =>
+      !titleEntry || entries.some(entry => databaseRecordValue(entry, "id") === titleEntry.id);
+
     forEachViewMap(dbBlock, view => {
       const viewColumn = new Y.Map<any>();
       viewColumn.set("id", columnId);
@@ -9276,11 +9286,17 @@ export function registerDocTools(
       viewColumn.set("width", spec.width);
       const viewColumns = view.get("columns");
       if (viewColumns instanceof Y.Array) {
+        if (!listsTitle(viewColumns.toArray())) viewColumns.insert(0, [toYValue(titleEntry)]);
         viewColumns.push([viewColumn]);
       } else if (Array.isArray(viewColumns)) {
-        view.set("columns", [...viewColumns, { id: columnId, hide: false, width: spec.width }]);
+        view.set("columns", [
+          ...(listsTitle(viewColumns) ? [] : [titleEntry]),
+          ...viewColumns,
+          { id: columnId, hide: false, width: spec.width },
+        ]);
       } else {
         const created = new Y.Array<any>();
+        if (titleEntry) created.push([toYValue(titleEntry)]);
         created.push([viewColumn]);
         view.set("columns", created);
       }
