@@ -251,7 +251,10 @@ Custom properties use AFFiNE's workspace-scoped tables. To recover values writte
 | Tool | Purpose | Notes |
 | --- | --- | --- |
 | `compose_database_from_intent` | Create or enrich a database block from a high-level schema intent | Useful for project boards and structured tables |
-| `add_database_column` | Add a column to a database block | Supports `title`, `rich-text`, `select`, `multi-select`, `number`, `checkbox`, `link`, and `date`; rejects a title addition when the current snapshot already contains one |
+| `add_database_column` | Add a column to a database block | Supports `title`, `rich-text`, `select`, `multi-select`, `number`, `checkbox`, `link`, `date`, `relation` (`relationTarget`, `twoWay`) and `formula` (`expression`, `resultType`); rejects a title addition when the current snapshot already contains one |
+| `update_database_column` | Rename, resize, or change the type of a column | Converts cells where possible and reports cleared ones; also sets a relation's target or two-way mirror and a formula's expression |
+| `update_select_options` | Add, rename, recolor, or remove select / multi-select options | Removed options are also removed from cells |
+| `delete_database_column` | Delete a column with its cells and view entries | Deletes a two-way relation's mirror column too; marked destructive but kept in the `authoring` profile |
 | `add_database_row` | Add a row to a database block | Rich-text and title values accept strings or delta arrays |
 | `delete_database_row` | Delete a row by row block id | Destructive |
 | `read_database_columns` | Read schema metadata, types, options, and view mappings | Useful before edits |

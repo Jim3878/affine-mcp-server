@@ -493,7 +493,9 @@ type DatabaseIntentPreset = {
   extraColumns: DatabaseIntentColumnSpec[];
   starterRows: DatabaseIntentSeedRow[];
 };
-const DATABASE_COLUMN_TYPE_VALUES = ["title", "rich-text", "select", "multi-select", "number", "checkbox", "link", "date"] as const;
+const DATABASE_COLUMN_TYPE_VALUES = ["title", "rich-text", "select", "multi-select", "number", "checkbox", "link", "date", "relation", "formula"] as const;
+/** NineDay: result types of a formula column (drives sorting and filtering in AFFiNE). */
+const FORMULA_RESULT_TYPE_VALUES = ["number", "text", "boolean", "date", "list"] as const;
 
 const MARKDOWN_IMPORT_KNOWN_LOSSES = [
   "Nested markdown lists are flattened during import.",
@@ -8617,6 +8619,12 @@ export function registerDocTools(
       case "link":
         cellValue.set("value", String(value ?? ""));
         break;
+      // NineDay: relation cells may live in another doc (two-way mirrors) and are written by
+      // the relation session; formula cells are computed by the editor and never stored.
+      case "relation":
+        throw new Error(`Column "${col.name}": relation cells must be written through update_database_row or add_database_row`);
+      case "formula":
+        throw new Error(`Column "${col.name}": formula cells are computed by AFFiNE; change the expression with update_database_column`);
       default:
         if (typeof value === "string") {
           cellValue.set("value", makeText(value));
@@ -8689,19 +8697,30 @@ export function registerDocTools(
     const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
     try {
       const creatorId = await fetchCurrentUserId(gql);
+      // NineDay: relation cells are written once the row exists (they may touch other docs).
+      const plainCells: Record<string, unknown> = {};
+      const relationCells: Array<[DatabaseColumnDef, unknown]> = [];
+      for (const [key, value] of Object.entries(parsed.cells)) {
+        const col = findDatabaseColumn(key, ctx);
+        if (col?.type === "relation") relationCells.push([col, value]);
+        else plainCells[key] = value;
+      }
       const rowBlockId = addDatabaseRowToBlock({
         blocks: ctx.blocks,
         dbBlock: ctx.dbBlock,
         cellsMap: ctx.cellsMap,
         databaseBlockId: parsed.databaseBlockId,
         lookup: ctx,
-        cells: parsed.cells,
+        cells: plainCells,
         linkedDocId: parsed.linkedDocId,
         creatorId,
       });
+      const session = createRelationSession(workspaceId, parsed.docId, ctx);
+      for (const [col, value] of relationCells) {
+        await session.write(rowBlockId, col, value);
+      }
 
-      const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
-      await pushPageDocUpdate(ctx.socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+      await pushDatabaseChanges(workspaceId, parsed.docId, ctx, session);
 
       return text({
         added: true,
@@ -8723,7 +8742,7 @@ export function registerDocTools(
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
         databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
-        cells: z.record(z.unknown()).describe('Map of column name (or column ID) to cell value. Rich-text and title values accept strings or delta arrays. For LinkedPage references, use insert: " " with reference.type="LinkedPage" and the target pageId; visible labels are resolved by AFFiNE. For select columns, pass the display label (option auto-created if new).'),
+        cells: z.record(z.unknown()).describe('Map of column name (or column ID) to cell value. Rich-text and title values accept strings or delta arrays. For LinkedPage references, use insert: " " with reference.type="LinkedPage" and the target pageId; visible labels are resolved by AFFiNE. For select columns, pass the display label (option auto-created if new). For relation columns, pass an array of related row titles or row IDs of the target database ([] clears).'),
         linkedDocId: z.string().optional().describe("Link this row to an existing doc by ID. The row will open the linked doc in center peek when clicked."),
       },
     },
@@ -8806,38 +8825,55 @@ export function registerDocTools(
           })
         : ctx.columnDefs;
       const requestedColumnIds = new Set(requestedColumns.map(col => col.id));
+      const session = createRelationSession(workspaceId, parsed.docId, ctx);
 
-      const rows = requestedRows.map(rowBlockId => {
+      const rows = [];
+      for (const rowBlockId of requestedRows) {
         const rowBlock = getDatabaseRowBlock(ctx.blocks, ctx.dbBlock, parsed.databaseBlockId, rowBlockId);
         const titleValue = rowBlock.get("prop:text");
         const title = richTextValueToString(titleValue) || null;
         const rowCells = ctx.cellsMap.get(rowBlockId);
         const cells: Record<string, Record<string, unknown>> = {};
 
-        if (rowCells instanceof Y.Map) {
-          for (const col of ctx.columnDefs) {
-            if (ctx.titleCol && col.id === ctx.titleCol.id) {
-              continue;
-            }
-            if (!requestedColumnIds.has(col.id)) {
-              continue;
-            }
-            const cellEntry = rowCells.get(col.id);
-            if (cellEntry === undefined) {
-              continue;
-            }
-            cells[col.name || col.id] = decodeDatabaseCellValue(col, cellEntry);
+        for (const col of ctx.columnDefs) {
+          if (ctx.titleCol && col.id === ctx.titleCol.id) {
+            continue;
           }
+          if (!requestedColumnIds.has(col.id)) {
+            continue;
+          }
+          // NineDay: relation cells resolve to row titles (mirror cells are computed from
+          // their source column); formula cells are computed by the editor, never stored.
+          if (col.type === "relation") {
+            const related = await session.describe(session.ownDb(), rowBlockId, col);
+            if (related.length || (rowCells instanceof Y.Map && rowCells.has(col.id))) {
+              cells[col.name || col.id] = {
+                columnId: col.id,
+                type: col.type,
+                value: related.map(item => item.title ?? item.id),
+                rowIds: related.map(item => item.id),
+              };
+            }
+            continue;
+          }
+          if (col.type === "formula") {
+            continue;
+          }
+          const cellEntry = rowCells instanceof Y.Map ? rowCells.get(col.id) : undefined;
+          if (cellEntry === undefined) {
+            continue;
+          }
+          cells[col.name || col.id] = decodeDatabaseCellValue(col, cellEntry);
         }
 
-        return {
+        rows.push({
           rowBlockId,
           title,
           titleDeltas: richTextValueToDeltas(titleValue) ?? [],
           linkedDocId: readLinkedDocId(rowBlock),
           cells,
-        };
-      });
+        });
+      }
 
       return text({ rows });
     } finally {
@@ -8848,7 +8884,7 @@ export function registerDocTools(
     "read_database_cells",
     {
       title: "Read Database Cells",
-      description: "Read row titles and database cell values from an AFFiNE database block. Rich-text titles and cells include both plain values and formatting-preserving deltas.",
+      description: "Read row titles and database cell values from an AFFiNE database block. Rich-text titles and cells include both plain values and formatting-preserving deltas. Relation cells list related row titles (value) and row IDs (rowIds). Formula cells are computed by the AFFiNE editor and are not returned; read their expressions with read_database_columns.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -8869,12 +8905,28 @@ export function registerDocTools(
     if (!workspaceId) throw new Error("workspaceId is required");
     const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
     try {
-      const columns = ctx.columnDefs.map(col => ({
-        id: col.id,
-        name: col.name || null,
-        type: col.type,
-        options: col.options,
-      }));
+      const columns = ctx.columnDefs.map(col => {
+        const data = columnDataOf(col);
+        return {
+          id: col.id,
+          name: col.name || null,
+          type: col.type,
+          options: col.options,
+          // NineDay: relation target / two-way links, and formula expressions.
+          ...(col.type === "relation"
+            ? {
+                relation: {
+                  target: data.target ? { docId: data.target.docId, databaseBlockId: data.target.blockId } : null,
+                  mirrorColumnId: typeof data.backlink === "string" ? data.backlink : null,
+                  mirrorOf: typeof data.mirrorOf === "string" ? data.mirrorOf : null,
+                },
+              }
+            : {}),
+          ...(col.type === "formula"
+            ? { formula: { expression: String(data.expression ?? ""), resultType: String(data.resultType ?? "text") } }
+            : {}),
+        };
+      });
 
       return text({
         databaseBlockId: parsed.databaseBlockId,
@@ -8893,7 +8945,7 @@ export function registerDocTools(
     "read_database_columns",
     {
       title: "Read Database Columns",
-      description: "Read schema metadata for an AFFiNE database block, including columns, select options, and view column mappings. Useful for empty databases before any rows exist.",
+      description: "Read schema metadata for an AFFiNE database block, including columns, select options, relation targets and two-way mirrors, formula expressions, and view column mappings. Useful for empty databases before any rows exist.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -8918,6 +8970,7 @@ export function registerDocTools(
     try {
       const rowBlock = getDatabaseRowBlock(ctx.blocks, ctx.dbBlock, parsed.databaseBlockId, parsed.rowBlockId);
       const rowCells = ensureDatabaseRowCells(ctx.cellsMap, parsed.rowBlockId);
+      const session = createRelationSession(workspaceId, parsed.docId, ctx);
       let titleValue: string | TextDelta[] | null = null;
 
       for (const [key, value] of Object.entries(parsed.cells)) {
@@ -8930,6 +8983,10 @@ export function registerDocTools(
           throw new Error(`Column '${key}' not found. Available columns: ${availableDatabaseColumns(ctx)}`);
         }
 
+        if (col.type === "relation") {
+          await session.write(parsed.rowBlockId, col, value);
+          continue;
+        }
         writeDatabaseCellValue(rowCells, col, value, parsed.createOption ?? true);
         if (col.type === "title" || isTitleAliasKey(col.name)) {
           titleValue = normalizeDatabaseRichTextValue(value);
@@ -8942,8 +8999,7 @@ export function registerDocTools(
         rowBlock.set("prop:text", makeText(titleValue));
       }
 
-      const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
-      await pushPageDocUpdate(ctx.socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+      await pushDatabaseChanges(workspaceId, parsed.docId, ctx, session);
 
       return text({
         updated: true,
@@ -8964,7 +9020,7 @@ export function registerDocTools(
         docId: DocId.describe("Document ID containing the database"),
         databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
         rowBlockId: z.string().min(1).describe("Row paragraph block ID"),
-        cells: z.record(z.unknown()).describe('Map of column name (or column ID) to new cell value. Rich-text and title values accept strings or delta arrays. For LinkedPage references, use insert: " " with reference.type="LinkedPage" and the target pageId; visible labels are resolved by AFFiNE. Use `title` for the built-in row title.'),
+        cells: z.record(z.unknown()).describe('Map of column name (or column ID) to new cell value. Rich-text and title values accept strings or delta arrays. For LinkedPage references, use insert: " " with reference.type="LinkedPage" and the target pageId; visible labels are resolved by AFFiNE. Use `title` for the built-in row title. For relation columns, pass an array of related row titles or row IDs of the target database ([] clears); writing a two-way mirror column updates the source column in the other database. Formula cells are computed and cannot be written.'),
         createOption: z.boolean().optional().describe("For select and multi-select columns, create the option label if it does not exist (default true)"),
         linkedDocId: z.string().optional().describe("Link this row to an existing doc by ID. The row will open the linked doc in center peek when clicked."),
       },
@@ -9105,6 +9161,492 @@ export function registerDocTools(
     }) => text(await composeDatabaseFromIntentCore(parsed)) as any
   );
 
+  // ── NineDay: column management, relation and formula columns ──
+  // Relation and formula are column types of the NineDay AFFiNE fork. Their formats
+  // (blocksuite/affine/blocks/database/src/properties/{relation,formula}):
+  //   relation data: { target?: { docId, blockId }, backlink?: columnId, mirrorOf?: columnId }
+  //     cells: row ids of the target database (older entries may be doc ids, resolved to the
+  //     row whose title links that doc). A mirror column (mirrorOf) stores nothing: its value
+  //     for a row is the rows of the target database whose `mirrorOf` cell holds that row.
+  //   formula data: { expression, resultType }; values are computed by the editor, not stored.
+
+  type RelationTarget = { docId: string; blockId: string };
+  type RelationRow = { id: string; title: string; docId: string | null };
+  type ColumnData = Record<string, any>;
+  type LoadedDb = {
+    docId: string;
+    blockId: string;
+    blocks: Y.Map<any>;
+    dbBlock: Y.Map<any>;
+    cellsMap: Y.Map<any>;
+    lookup: DatabaseColumnLookup;
+  };
+
+  /** Plain JSON copy of a column's `data` (empty when the column has none). */
+  function columnDataOf(col: DatabaseColumnDef): ColumnData {
+    const data = col.raw instanceof Y.Map ? col.raw.get("data") : col.raw?.data;
+    if (data instanceof Y.Map) return data.toJSON();
+    return data && typeof data === "object" ? JSON.parse(JSON.stringify(data)) : {};
+  }
+
+  /** Plain values to the nested Y types BlockSuite stores props as. */
+  function toYValue(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      const array = new Y.Array<any>();
+      array.push(value.map(toYValue));
+      return array;
+    }
+    if (value && typeof value === "object" && !(value instanceof Y.AbstractType)) {
+      const map = new Y.Map<any>();
+      for (const [key, entry] of Object.entries(value)) {
+        if (entry !== undefined) map.set(key, toYValue(entry));
+      }
+      return map;
+    }
+    return value;
+  }
+
+  function rawColumnMap(col: DatabaseColumnDef): Y.Map<any> {
+    if (!(col.raw instanceof Y.Map)) {
+      throw new Error(`Column "${col.name}" is not stored as a Y.Map and cannot be edited`);
+    }
+    return col.raw;
+  }
+
+  function setColumnData(col: DatabaseColumnDef, data: ColumnData): void {
+    rawColumnMap(col).set("data", toYValue(data));
+  }
+
+  /** The `data` AFFiNE gives a new column of each type (columns without it break menus). */
+  function defaultColumnData(type: string): ColumnData {
+    switch (type) {
+      case "select":
+      case "multi-select":
+        return { options: [] };
+      case "number":
+        return { decimal: 0, format: "number" };
+      case "formula":
+        return { expression: "", resultType: "text" };
+      default:
+        return {};
+    }
+  }
+
+  function selectOptionsFromValues(values: string[]): Array<{ id: string; value: string; color: string }> {
+    return values.map((value, index) => ({
+      id: generateId(),
+      value,
+      color: SELECT_COLORS[index % SELECT_COLORS.length],
+    }));
+  }
+
+  function databaseTitleOf(dbBlock: Y.Map<any>): string {
+    return richTextValueToString(dbBlock.get("prop:title")) || "";
+  }
+
+  function forEachViewMap(dbBlock: Y.Map<any>, fn: (view: Y.Map<any>) => void): void {
+    const views = dbBlock.get("prop:views");
+    if (!(views instanceof Y.Array)) return;
+    views.forEach((view: unknown) => {
+      if (view instanceof Y.Map) fn(view);
+    });
+  }
+
+  /** Adds a column definition and shows it in every view. Returns the new column id. */
+  function appendDatabaseColumn(
+    dbBlock: Y.Map<any>,
+    spec: { name: string; type: string; width: number; data: ColumnData },
+  ): string {
+    const columns = dbBlock.get("prop:columns");
+    if (!(columns instanceof Y.Array)) throw new Error("Database has no columns array");
+
+    const columnId = generateId();
+    const column = new Y.Map<any>();
+    column.set("id", columnId);
+    column.set("name", spec.name);
+    column.set("type", spec.type);
+    column.set("width", spec.width);
+    column.set("data", toYValue(spec.data));
+    columns.push([column]);
+
+    forEachViewMap(dbBlock, view => {
+      const viewColumn = new Y.Map<any>();
+      viewColumn.set("id", columnId);
+      viewColumn.set("hide", false);
+      viewColumn.set("width", spec.width);
+      const viewColumns = view.get("columns");
+      if (viewColumns instanceof Y.Array) {
+        viewColumns.push([viewColumn]);
+      } else if (Array.isArray(viewColumns)) {
+        view.set("columns", [...viewColumns, { id: columnId, hide: false, width: spec.width }]);
+      } else {
+        const created = new Y.Array<any>();
+        created.push([viewColumn]);
+        view.set("columns", created);
+      }
+      if (spec.type === "title") {
+        const header = view.get("header");
+        if (header instanceof Y.Map) {
+          header.set("titleColumn", columnId);
+        } else {
+          view.set("header", { ...(header && typeof header === "object" ? header : {}), titleColumn: columnId });
+        }
+      }
+    });
+    return columnId;
+  }
+
+  /** Removes a column definition, its cells, and its entries in every view. */
+  function removeDatabaseColumn(db: { dbBlock: Y.Map<any>; cellsMap: Y.Map<any> }, columnId: string): number {
+    const columns = db.dbBlock.get("prop:columns");
+    if (columns instanceof Y.Array) {
+      for (let index = columns.length - 1; index >= 0; index -= 1) {
+        const entry = columns.get(index);
+        const id = entry instanceof Y.Map ? entry.get("id") : (entry as any)?.id;
+        if (id === columnId) columns.delete(index, 1);
+      }
+    }
+    let clearedCells = 0;
+    db.cellsMap.forEach((rowCells: unknown) => {
+      if (rowCells instanceof Y.Map && rowCells.has(columnId)) {
+        rowCells.delete(columnId);
+        clearedCells += 1;
+      }
+    });
+    forEachViewMap(db.dbBlock, view => {
+      const viewColumns = view.get("columns");
+      if (viewColumns instanceof Y.Array) {
+        for (let index = viewColumns.length - 1; index >= 0; index -= 1) {
+          const entry = viewColumns.get(index);
+          const id = entry instanceof Y.Map ? entry.get("id") : (entry as any)?.id;
+          if (id === columnId) viewColumns.delete(index, 1);
+        }
+      } else if (Array.isArray(viewColumns)) {
+        view.set("columns", viewColumns.filter((entry: any) => entry?.id !== columnId));
+      }
+      if (databaseRecordValue(view.get("groupBy"), "columnId") === columnId) {
+        view.delete("groupBy");
+      }
+    });
+    return clearedCells;
+  }
+
+  function formulaColumnsUsing(lookup: DatabaseColumnLookup, name: string): string[] {
+    return lookup.columnDefs
+      .filter(col => col.type === "formula" && String(columnDataOf(col).expression ?? "").includes(name))
+      .map(col => col.name || col.id);
+  }
+
+  /**
+   * Access to the databases a relation column touches: the database being edited, other
+   * databases in the same doc, and databases in other docs (loaded over the same socket and
+   * pushed by `commit`).
+   */
+  function createRelationSession(workspaceId: string, primaryDocId: string, primary: DatabaseDocContext) {
+    const otherDocs = new Map<string, { doc: Y.Doc; prevSV: Uint8Array; blocks: Y.Map<any> }>();
+    let docTitles: Map<string, string> | null = null;
+
+    async function blocksOf(docId: string): Promise<Y.Map<any>> {
+      if (docId === primaryDocId) return primary.blocks;
+      const cached = otherDocs.get(docId);
+      if (cached) return cached.blocks;
+      const snapshot = await loadDoc(primary.socket, workspaceId, docId);
+      if (!snapshot.missing) throw new Error(`Relation target document '${docId}' not found`);
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
+      const entry = { doc, prevSV: Y.encodeStateVector(doc), blocks: doc.getMap("blocks") as Y.Map<any> };
+      otherDocs.set(docId, entry);
+      return entry.blocks;
+    }
+
+    async function database(target: RelationTarget): Promise<LoadedDb> {
+      const blocks = await blocksOf(target.docId);
+      const dbBlock = findBlockById(blocks, target.blockId);
+      if (!dbBlock || dbBlock.get("sys:flavour") !== "affine:database") {
+        throw new Error(`Relation target '${target.blockId}' in doc '${target.docId}' is not a database`);
+      }
+      const cellsMap = dbBlock.get("prop:cells");
+      if (!(cellsMap instanceof Y.Map)) throw new Error(`Relation target '${target.blockId}' has no cells map`);
+      return {
+        docId: target.docId,
+        blockId: target.blockId,
+        blocks,
+        dbBlock,
+        cellsMap,
+        lookup: buildDatabaseColumnLookup(readColumnDefs(dbBlock)),
+      };
+    }
+
+    async function titlesOfDocs(): Promise<Map<string, string>> {
+      if (!docTitles) {
+        docTitles = new Map();
+        const meta = await loadWorkspaceMetadataDoc(primary.socket, workspaceId);
+        const pages = meta.getMap("meta").get("pages");
+        if (pages instanceof Y.Array) {
+          pages.forEach((page: unknown) => {
+            if (!(page instanceof Y.Map) || page.get("trash") === true) return;
+            const id = page.get("id");
+            if (typeof id === "string") docTitles!.set(id, String(page.get("title") ?? ""));
+          });
+        }
+      }
+      return docTitles;
+    }
+
+    async function rowsOf(db: LoadedDb): Promise<RelationRow[]> {
+      const rows: RelationRow[] = [];
+      for (const rowId of getDatabaseRowIds(db.dbBlock)) {
+        const rowBlock = findBlockById(db.blocks, rowId);
+        if (!rowBlock) continue;
+        const docId = readLinkedDocId(rowBlock);
+        let title = (richTextValueToString(rowBlock.get("prop:text")) || "").trim();
+        if (docId && !title) title = (await titlesOfDocs()).get(docId) ?? "";
+        rows.push({ id: rowId, title, docId });
+      }
+      return rows;
+    }
+
+    function rowLink(db: { blocks: Y.Map<any> }, rowId: string): string | null {
+      const rowBlock = findBlockById(db.blocks, rowId);
+      return rowBlock ? readLinkedDocId(rowBlock) : null;
+    }
+
+    function storedEntries(db: { cellsMap: Y.Map<any> }, rowId: string, columnId: string): string[] {
+      const rowCells = db.cellsMap.get(rowId);
+      const cell = rowCells instanceof Y.Map ? rowCells.get(columnId) : undefined;
+      return databaseArrayValues(databaseRecordValue(cell, "value")).filter((v): v is string => typeof v === "string");
+    }
+
+    function writeEntries(db: { cellsMap: Y.Map<any> }, rowId: string, columnId: string, entries: string[]): void {
+      const rowCells = ensureDatabaseRowCells(db.cellsMap, rowId);
+      const cell = new Y.Map<any>();
+      cell.set("columnId", columnId);
+      const value = new Y.Array<string>();
+      value.push(entries);
+      cell.set("value", value);
+      rowCells.set(columnId, cell);
+    }
+
+    const ownDb = (): LoadedDb => ({
+      docId: primaryDocId,
+      blockId: String(primary.dbBlock.get("sys:id")),
+      blocks: primary.blocks,
+      dbBlock: primary.dbBlock,
+      cellsMap: primary.cellsMap,
+      lookup: primary,
+    });
+
+    function targetOf(data: ColumnData): RelationTarget | null {
+      const target = data.target;
+      return target && typeof target.docId === "string" && typeof target.blockId === "string"
+        ? { docId: target.docId, blockId: target.blockId }
+        : null;
+    }
+
+    /** For a mirror column: the source database and column, if both still exist. */
+    async function mirrorSource(col: DatabaseColumnDef): Promise<{ db: LoadedDb; columnId: string } | null> {
+      const data = columnDataOf(col);
+      const target = targetOf(data);
+      if (!target || typeof data.mirrorOf !== "string") return null;
+      const db = await database(target).catch(() => null);
+      if (!db || db.lookup.colById.get(data.mirrorOf)?.type !== "relation") return null;
+      return { db, columnId: data.mirrorOf };
+    }
+
+    /** Row ids (or doc ids, for target-less columns) a relation cell holds. */
+    async function entriesOf(db: LoadedDb, rowId: string, col: DatabaseColumnDef): Promise<string[]> {
+      const source = await mirrorSource(col);
+      if (!source) return storedEntries(db, rowId, col.id);
+      const link = rowLink(db, rowId);
+      return getDatabaseRowIds(source.db.dbBlock).filter(sourceRowId =>
+        storedEntries(source.db, sourceRowId, source.columnId).some(e => e === rowId || (link !== null && e === link))
+      );
+    }
+
+    async function describe(db: LoadedDb, rowId: string, col: DatabaseColumnDef) {
+      const entries = await entriesOf(db, rowId, col);
+      const target = targetOf(columnDataOf(col));
+      if (!target) {
+        const titles = await titlesOfDocs();
+        return entries.map(id => ({ id, title: titles.get(id) ?? null }));
+      }
+      const rows = await rowsOf(await database(target)).catch(() => [] as RelationRow[]);
+      return entries.map(entry => {
+        const row = rows.find(r => r.id === entry) ?? rows.find(r => r.docId === entry);
+        return { id: row?.id ?? entry, title: row?.title ?? null };
+      });
+    }
+
+    /** Resolves row ids, linked doc ids, or row titles to row ids of the target. */
+    async function resolveEntries(col: DatabaseColumnDef, value: unknown): Promise<string[]> {
+      const inputs = (Array.isArray(value) ? value : value == null || value === "" ? [] : [value])
+        .map(v => String(v).trim())
+        .filter(Boolean);
+      const target = targetOf(columnDataOf(col));
+      const ids: string[] = [];
+      const missing: string[] = [];
+      if (!target) {
+        const titles = await titlesOfDocs();
+        for (const input of inputs) {
+          const id = titles.has(input) ? input : [...titles].find(([, title]) => title === input)?.[0];
+          if (id) {
+            if (!ids.includes(id)) ids.push(id);
+          } else {
+            missing.push(input);
+          }
+        }
+      } else {
+        const rows = await rowsOf(await database(target));
+        for (const input of inputs) {
+          const lower = input.toLowerCase();
+          const byTitle = rows.filter(r => r.title === input);
+          const byTitleLoose = rows.filter(r => r.title.toLowerCase() === lower);
+          const row = rows.find(r => r.id === input)
+            ?? rows.find(r => r.docId === input)
+            ?? (byTitle.length === 1 ? byTitle[0] : undefined)
+            ?? (byTitle.length === 0 && byTitleLoose.length === 1 ? byTitleLoose[0] : undefined);
+          if (!row) {
+            missing.push(byTitle.length > 1 || byTitleLoose.length > 1 ? `${input} (several rows have this title; use the row id)` : input);
+          } else if (!ids.includes(row.id)) {
+            ids.push(row.id);
+          }
+        }
+      }
+      if (missing.length) {
+        throw new Error(`Column "${col.name}": no related ${target ? "row" : "doc"} for ${missing.map(m => JSON.stringify(m)).join(", ")}`);
+      }
+      return ids;
+    }
+
+    /** Sets a relation cell of the edited database; a mirror cell rewrites its source column. */
+    async function write(rowId: string, col: DatabaseColumnDef, value: unknown): Promise<string[]> {
+      const ids = await resolveEntries(col, value);
+      const own = ownDb();
+      const source = await mirrorSource(col);
+      if (!source) {
+        writeEntries(own, rowId, col.id, ids);
+        return ids;
+      }
+      const link = rowLink(own, rowId);
+      const want = new Set(ids);
+      for (const sourceRowId of getDatabaseRowIds(source.db.dbBlock)) {
+        const entries = storedEntries(source.db, sourceRowId, source.columnId);
+        const has = entries.some(e => e === rowId || (link !== null && e === link));
+        if (has === want.has(sourceRowId)) continue;
+        writeEntries(
+          source.db,
+          sourceRowId,
+          source.columnId,
+          has ? entries.filter(e => e !== rowId && e !== link) : [...entries, rowId],
+        );
+      }
+      return ids;
+    }
+
+    /** Adds the mirror column for a two-way relation. Returns the mirror column id. */
+    async function enableTwoWay(col: DatabaseColumnDef): Promise<string> {
+      const data = columnDataOf(col);
+      const target = targetOf(data);
+      if (!target) throw new Error(`Column "${col.name}": two-way needs a relation target`);
+      if (typeof data.mirrorOf === "string") throw new Error(`Column "${col.name}" is already the mirror side of a two-way relation`);
+      const other = await database(target);
+      const existing = typeof data.backlink === "string" ? other.lookup.colById.get(data.backlink) : undefined;
+      if (existing && columnDataOf(existing).mirrorOf === col.id) return existing.id;
+      const own = ownDb();
+      const self = { docId: own.docId, blockId: own.blockId };
+      const sameDatabase = target.docId === self.docId && target.blockId === self.blockId;
+      const base = sameDatabase ? `${col.name} (back)` : databaseTitleOf(own.dbBlock) || "Related";
+      let name = base;
+      for (let i = 2; other.lookup.colByName.has(name); i += 1) name = `${base} ${i}`;
+      const mirrorId = appendDatabaseColumn(other.dbBlock, {
+        name,
+        type: "relation",
+        width: 200,
+        data: { target: self, mirrorOf: col.id },
+      });
+      setColumnData(col, { ...data, backlink: mirrorId });
+      return mirrorId;
+    }
+
+    /**
+     * Turns two-way off: for a source column, deletes its mirror; for a mirror, clears the
+     * source's backlink (the caller deletes the mirror itself). Returns what was removed.
+     */
+    async function disableTwoWay(col: DatabaseColumnDef): Promise<{ removedMirror: string | null }> {
+      const data = columnDataOf(col);
+      const target = targetOf(data);
+      if (!target) return { removedMirror: null };
+      if (typeof data.mirrorOf === "string") {
+        const source = await database(target).catch(() => null);
+        const sourceCol = source?.lookup.colById.get(data.mirrorOf);
+        if (sourceCol && columnDataOf(sourceCol).backlink === col.id) {
+          const { backlink: _removed, ...rest } = columnDataOf(sourceCol);
+          setColumnData(sourceCol, rest);
+        }
+        return { removedMirror: null };
+      }
+      let removedMirror: string | null = null;
+      if (typeof data.backlink === "string") {
+        const other = await database(target).catch(() => null);
+        const mirror = other?.lookup.colById.get(data.backlink);
+        if (other && mirror && columnDataOf(mirror).mirrorOf === col.id) {
+          removeDatabaseColumn(other, mirror.id);
+          removedMirror = `${mirror.name} (${other.docId === primaryDocId ? "this doc" : `doc ${other.docId}`})`;
+        }
+      }
+      const { backlink: _removed, ...rest } = data;
+      setColumnData(col, rest);
+      return { removedMirror };
+    }
+
+    /** Pushes changes made to other docs (the caller pushes the primary doc). */
+    async function commit(): Promise<string[]> {
+      const pushed: string[] = [];
+      for (const [docId, entry] of otherDocs) {
+        const delta = Y.encodeStateAsUpdate(entry.doc, entry.prevSV);
+        if (delta.length <= 2) continue;
+        await pushPageDocUpdate(primary.socket, workspaceId, docId, Buffer.from(delta).toString("base64"));
+        pushed.push(docId);
+      }
+      return pushed;
+    }
+
+    return { database, ownDb, targetOf, entriesOf, describe, write, enableTwoWay, disableTwoWay, commit };
+  }
+
+  type RelationSession = ReturnType<typeof createRelationSession>;
+
+  async function pushDatabaseChanges(
+    workspaceId: string,
+    docId: string,
+    ctx: DatabaseDocContext,
+    session?: RelationSession,
+  ): Promise<string[]> {
+    const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
+    await pushPageDocUpdate(ctx.socket, workspaceId, docId, Buffer.from(delta).toString("base64"));
+    return session ? session.commit() : [];
+  }
+
+  function requireColumn(ctx: DatabaseColumnLookup, key: string): DatabaseColumnDef {
+    const col = findDatabaseColumn(key, ctx);
+    if (!col) throw new Error(`Column '${key}' not found. Available columns: ${availableDatabaseColumns(ctx)}`);
+    return col;
+  }
+
+  const RelationTargetInput = z.object({
+    docId: z.string().min(1).describe("Doc that contains the target database"),
+    databaseBlockId: z.string().min(1).describe("Block ID of the target affine:database block"),
+  });
+
+  async function checkedRelationTarget(
+    session: RelationSession,
+    input: { docId: string; databaseBlockId: string },
+  ): Promise<RelationTarget> {
+    const target = { docId: input.docId, blockId: input.databaseBlockId };
+    await session.database(target);
+    return target;
+  }
+
   // ADD DATABASE COLUMN
   const addDatabaseColumnHandler = async (parsed: {
     workspaceId?: string;
@@ -9114,147 +9656,72 @@ export function registerDocTools(
     type: string;
     options?: string[];
     width?: number;
+    relationTarget?: { docId: string; databaseBlockId: string };
+    twoWay?: boolean;
+    expression?: string;
+    resultType?: string;
   }) => {
     const workspaceId = parsed.workspaceId || defaults.workspaceId;
     if (!workspaceId) throw new Error("workspaceId is required");
-
-    const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
-    const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
-    const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+    const type = parsed.type || "rich-text";
+    const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
     try {
-      await joinWorkspace(socket, workspaceId);
-
-      const doc = new Y.Doc();
-      const snapshot = await loadDoc(socket, workspaceId, parsed.docId);
-      if (!snapshot.missing) throw new Error("Document not found");
-      Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
-
-      const prevSV = Y.encodeStateVector(doc);
-      const blocks = doc.getMap("blocks") as Y.Map<any>;
-
-      const dbBlock = findBlockById(blocks, parsed.databaseBlockId);
-      if (!dbBlock) throw new Error(`Database block '${parsed.databaseBlockId}' not found`);
-      if (dbBlock.get("sys:flavour") !== "affine:database") {
-        throw new Error("Block is not a database");
-      }
-
-      const columns = dbBlock.get("prop:columns");
-      if (!(columns instanceof Y.Array)) throw new Error("Database has no columns array");
-
-      // Check for duplicate name
-      const existingDefs = readColumnDefs(dbBlock);
-      if (existingDefs.some(c => c.name === parsed.name)) {
+      if (ctx.columnDefs.some(c => c.name === parsed.name)) {
         throw new Error(`Column '${parsed.name}' already exists`);
       }
-      if (parsed.type === "title" && existingDefs.some(c => c.type === "title")) {
+      if (type === "title" && ctx.columnDefs.some(c => c.type === "title")) {
         throw new Error("Database already has a title column");
       }
-
-      const columnId = generateId();
-      const column = new Y.Map<any>();
-      column.set("id", columnId);
-      column.set("name", parsed.name);
-      column.set("type", parsed.type || "rich-text");
-      column.set("width", parsed.width || 200);
-
-      // For select/multi-select, create options
-      if ((parsed.type === "select" || parsed.type === "multi-select") && parsed.options?.length) {
-        const data = new Y.Map<any>();
-        const opts = new Y.Array<any>();
-        for (let i = 0; i < parsed.options.length; i++) {
-          const optMap = new Y.Map<any>();
-          optMap.set("id", generateId());
-          optMap.set("value", parsed.options[i]);
-          optMap.set("color", SELECT_COLORS[i % SELECT_COLORS.length]);
-          opts.push([optMap]);
-        }
-        data.set("options", opts);
-        column.set("data", data);
+      if (type !== "relation" && (parsed.relationTarget || parsed.twoWay)) {
+        throw new Error("relationTarget and twoWay only apply to relation columns");
+      }
+      if (type !== "formula" && (parsed.expression !== undefined || parsed.resultType !== undefined)) {
+        throw new Error("expression and resultType only apply to formula columns");
       }
 
-      columns.push([column]);
-
-      // Also add the column to all existing views so it's visible
-      const views = dbBlock.get("prop:views");
-      if (views instanceof Y.Array) {
-        const width = parsed.width || 200;
-        const plainViewColumn = { id: columnId, hide: false, width };
-        for (let viewIndex = 0; viewIndex < views.length; viewIndex += 1) {
-          const view = views.get(viewIndex);
-          if (view instanceof Y.Map) {
-            const viewColumns = view.get("columns");
-            if (viewColumns instanceof Y.Array) {
-              const viewCol = new Y.Map<any>();
-              viewCol.set("id", columnId);
-              viewCol.set("hide", false);
-              viewCol.set("width", width);
-              viewColumns.push([viewCol]);
-            } else if (Array.isArray(viewColumns)) {
-              view.set("columns", [...viewColumns, plainViewColumn]);
-            } else {
-              const createdColumns = new Y.Array<any>();
-              const viewCol = new Y.Map<any>();
-              viewCol.set("id", columnId);
-              viewCol.set("hide", false);
-              viewCol.set("width", width);
-              createdColumns.push([viewCol]);
-              view.set("columns", createdColumns);
-            }
-            if (parsed.type === "title") {
-              const header = view.get("header");
-              if (header instanceof Y.Map) {
-                header.set("titleColumn", columnId);
-              } else {
-                view.set("header", {
-                  ...(header && typeof header === "object" ? header : {}),
-                  titleColumn: columnId,
-                });
-              }
-            }
-            continue;
-          }
-
-          if (view && typeof view === "object") {
-            const plainView = view as Record<string, any>;
-            const plainColumns = databaseArrayValues(plainView.columns).map(entry =>
-              entry instanceof Y.Map ? entry.toJSON() : entry
-            );
-            const header = plainView.header instanceof Y.Map
-              ? plainView.header.toJSON()
-              : plainView.header && typeof plainView.header === "object"
-                ? plainView.header
-                : {};
-            const updatedView = {
-              ...plainView,
-              columns: [...plainColumns, plainViewColumn],
-              ...(parsed.type === "title"
-                ? { header: { ...header, titleColumn: columnId } }
-                : {}),
-            };
-            views.delete(viewIndex, 1);
-            views.insert(viewIndex, [updatedView]);
-          }
-        }
+      const session = createRelationSession(workspaceId, parsed.docId, ctx);
+      let data = defaultColumnData(type);
+      if ((type === "select" || type === "multi-select") && parsed.options?.length) {
+        data = { options: selectOptionsFromValues(parsed.options) };
+      }
+      if (type === "relation" && parsed.relationTarget) {
+        data = { target: await checkedRelationTarget(session, parsed.relationTarget) };
+      }
+      if (type === "formula") {
+        data = { expression: parsed.expression ?? "", resultType: parsed.resultType ?? "text" };
       }
 
-      const delta = Y.encodeStateAsUpdate(doc, prevSV);
-      await pushPageDocUpdate(socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+      const columnId = appendDatabaseColumn(ctx.dbBlock, {
+        name: parsed.name,
+        type,
+        width: parsed.width || 200,
+        data,
+      });
+
+      let mirrorColumnId: string | null = null;
+      if (parsed.twoWay) {
+        const col = buildDatabaseColumnLookup(readColumnDefs(ctx.dbBlock)).colById.get(columnId)!;
+        mirrorColumnId = await session.enableTwoWay(col);
+      }
+
+      await pushDatabaseChanges(workspaceId, parsed.docId, ctx, session);
 
       return text({
         added: true,
         columnId,
         name: parsed.name,
-        type: parsed.type || "rich-text",
+        type,
+        ...(mirrorColumnId ? { mirrorColumnId } : {}),
       });
     } finally {
-      socket.disconnect();
+      ctx.socket.disconnect();
     }
   };
   server.registerTool(
     "add_database_column",
     {
       title: "Add Database Column",
-      description: "Add a column to an existing AFFiNE database block. Supports title, rich-text, select, multi-select, number, checkbox, link, and date types. A title addition is rejected when the current database snapshot already has a title column.",
+      description: "Add a column to an existing AFFiNE database block. Supports title, rich-text, select, multi-select, number, checkbox, link, date, relation, and formula types. A title addition is rejected when the current database snapshot already has a title column. A relation column links rows of another database (relationTarget); twoWay also adds a mirror column to the target database. A formula column takes a Notion-style expression (e.g. prop(\"Price\") * prop(\"Qty\")) whose values AFFiNE computes in the editor.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -9263,9 +9730,428 @@ export function registerDocTools(
         type: z.enum(DATABASE_COLUMN_TYPE_VALUES).default("rich-text").describe("Column type"),
         options: z.array(z.string()).optional().describe("Predefined options for select/multi-select columns"),
         width: z.number().optional().describe("Column width in pixels (default 200)"),
+        relationTarget: RelationTargetInput.optional().describe("Relation columns: the database whose rows this column links (may be this database or one in another doc). Without it, cells link docs instead of rows."),
+        twoWay: z.boolean().optional().describe("Relation columns: also add a mirror column to the target database that shows the rows pointing at each of its rows"),
+        expression: z.string().optional().describe("Formula columns: the formula, e.g. prop(\"Price\") * prop(\"Qty\"). Syntax: https://github.com/Jim3878/AFFiNE/blob/nineday/docs/formula.md"),
+        resultType: z.enum(FORMULA_RESULT_TYPE_VALUES).optional().describe("Formula columns: type of the results, used for sorting and filtering (default text)"),
       },
     },
     addDatabaseColumnHandler as any
+  );
+
+  // UPDATE DATABASE COLUMN
+  /** A cell's value as plain strings (option labels, titles...), for type conversion. */
+  async function cellStrings(
+    session: RelationSession,
+    col: DatabaseColumnDef,
+    rowId: string,
+    entry: unknown,
+  ): Promise<string[]> {
+    if (col.type === "relation") {
+      const described = await session.describe(session.ownDb(), rowId, col);
+      return described.map(item => item.title ?? item.id);
+    }
+    if (col.type === "formula" || entry === undefined) return [];
+    const decoded = decodeDatabaseCellValue(col, entry).value;
+    if (decoded == null || decoded === "") return [];
+    if (Array.isArray(decoded)) return decoded.map(String).filter(Boolean);
+    if (col.type === "checkbox") return decoded ? ["Yes"] : [];
+    if (col.type === "date" && typeof decoded === "number") return [new Date(decoded).toISOString().slice(0, 10)];
+    return [String(decoded)];
+  }
+
+  async function convertColumnType(
+    session: RelationSession,
+    ctx: DatabaseDocContext,
+    col: DatabaseColumnDef,
+    toType: string,
+    newData: ColumnData,
+  ): Promise<{ data: ColumnData; converted: number; cleared: number }> {
+    const rows = getDatabaseRowIds(ctx.dbBlock);
+    const options = new Map<string, { id: string; value: string; color: string }>();
+    // select <-> multi-select keeps option ids.
+    if ((col.type === "select" || col.type === "multi-select") && (toType === "select" || toType === "multi-select")) {
+      for (const option of col.options) options.set(option.value, option);
+    }
+    const optionId = (label: string) => {
+      let option = options.get(label);
+      if (!option) {
+        option = { id: generateId(), value: label, color: SELECT_COLORS[options.size % SELECT_COLORS.length] };
+        options.set(label, option);
+      }
+      return option.id;
+    };
+
+    const values: Array<[string, unknown]> = [];
+    let cleared = 0;
+    for (const rowId of rows) {
+      const rowCells = ctx.cellsMap.get(rowId);
+      const entry = rowCells instanceof Y.Map ? rowCells.get(col.id) : undefined;
+      const strings = await cellStrings(session, col, rowId, entry);
+      if (!strings.length) continue;
+      const joined = strings.join(",");
+      let next: unknown;
+      switch (toType) {
+        case "rich-text":
+        case "link":
+          next = joined;
+          break;
+        case "select":
+          next = optionId(strings[0]!.split(",")[0]!.trim());
+          break;
+        case "multi-select":
+          next = strings.flatMap(s => s.split(",")).map(s => s.trim()).filter(Boolean).map(optionId);
+          break;
+        case "number": {
+          const num = parseFloat(joined);
+          next = Number.isFinite(num) ? num : undefined;
+          break;
+        }
+        case "checkbox":
+          next = ["yes", "true", "1"].includes(joined.trim().toLowerCase()) ? true : undefined;
+          break;
+        case "date": {
+          const num = /^-?\d+(\.\d+)?$/.test(joined) ? Number(joined) : Date.parse(joined);
+          next = Number.isFinite(num) ? num : undefined;
+          break;
+        }
+        default: // relation, formula: nothing carries over
+          next = undefined;
+      }
+      if (next === undefined || (Array.isArray(next) && !next.length)) {
+        cleared += 1;
+        continue;
+      }
+      values.push([rowId, next]);
+    }
+
+    // Write: drop every stored cell of the column, then the converted ones.
+    ctx.cellsMap.forEach((rowCells: unknown) => {
+      if (rowCells instanceof Y.Map) rowCells.delete(col.id);
+    });
+    for (const [rowId, value] of values) {
+      const cell = new Y.Map<any>();
+      cell.set("columnId", col.id);
+      cell.set("value", toType === "rich-text" ? makeText(String(value)) : toYValue(value));
+      ensureDatabaseRowCells(ctx.cellsMap, rowId).set(col.id, cell);
+    }
+
+    const data = toType === "select" || toType === "multi-select"
+      ? { ...newData, options: [...options.values()] }
+      : newData;
+    return { data, converted: values.length, cleared };
+  }
+
+  const updateDatabaseColumnHandler = async (parsed: {
+    workspaceId?: string;
+    docId: string;
+    databaseBlockId: string;
+    column: string;
+    name?: string;
+    width?: number;
+    type?: string;
+    relationTarget?: { docId: string; databaseBlockId: string };
+    twoWay?: boolean;
+    expression?: string;
+    resultType?: string;
+  }) => {
+    const workspaceId = parsed.workspaceId || defaults.workspaceId;
+    if (!workspaceId) throw new Error("workspaceId is required");
+    const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+    try {
+      const session = createRelationSession(workspaceId, parsed.docId, ctx);
+      const col = requireColumn(ctx, parsed.column);
+      const raw = rawColumnMap(col);
+      const changed: string[] = [];
+      const warnings: string[] = [];
+      let conversion: { converted: number; cleared: number } | null = null;
+      let mirrorColumnId: string | null = null;
+      let removedMirror: string | null = null;
+
+      if (parsed.type && parsed.type !== col.type) {
+        if (col.type === "title" || parsed.type === "title") {
+          throw new Error("The title column's type cannot be changed, and no column can become the title column");
+        }
+        if (col.type === "relation") {
+          if (typeof columnDataOf(col).mirrorOf === "string") {
+            throw new Error(`Column "${col.name}" is the mirror side of a two-way relation; delete it instead`);
+          }
+          removedMirror = (await session.disableTwoWay(col)).removedMirror;
+        }
+        let newData = defaultColumnData(parsed.type);
+        if (parsed.type === "relation" && parsed.relationTarget) {
+          newData = { target: await checkedRelationTarget(session, parsed.relationTarget) };
+        }
+        if (parsed.type === "formula") {
+          newData = { expression: parsed.expression ?? "", resultType: parsed.resultType ?? "text" };
+        }
+        const result = await convertColumnType(session, ctx, col, parsed.type, newData);
+        raw.set("type", parsed.type);
+        raw.set("data", toYValue(result.data));
+        col.type = parsed.type;
+        conversion = { converted: result.converted, cleared: result.cleared };
+        changed.push("type");
+        if (result.cleared) {
+          warnings.push(`${result.cleared} cell(s) could not be converted to ${parsed.type} and were cleared`);
+        }
+      } else {
+        if (parsed.relationTarget) {
+          if (col.type !== "relation") throw new Error("relationTarget only applies to relation columns");
+          if (typeof columnDataOf(col).mirrorOf === "string") {
+            throw new Error(`Column "${col.name}" is the mirror side of a two-way relation; change the source column instead`);
+          }
+          const target = await checkedRelationTarget(session, parsed.relationTarget);
+          const current = session.targetOf(columnDataOf(col));
+          if (!current || current.docId !== target.docId || current.blockId !== target.blockId) {
+            removedMirror = (await session.disableTwoWay(col)).removedMirror;
+            setColumnData(col, { ...columnDataOf(col), target });
+            changed.push("relationTarget");
+            warnings.push("Existing cells still hold rows of the previous target; they show as unresolved until rewritten");
+          }
+        }
+        if (parsed.expression !== undefined || parsed.resultType !== undefined) {
+          if (col.type !== "formula") throw new Error("expression and resultType only apply to formula columns");
+          const data = columnDataOf(col);
+          setColumnData(col, {
+            ...data,
+            expression: parsed.expression ?? data.expression ?? "",
+            resultType: parsed.resultType ?? data.resultType ?? "text",
+          });
+          changed.push("formula");
+        }
+      }
+
+      if (parsed.twoWay !== undefined) {
+        if (col.type !== "relation") throw new Error("twoWay only applies to relation columns");
+        if (parsed.twoWay) {
+          mirrorColumnId = await session.enableTwoWay(col);
+        } else {
+          removedMirror = (await session.disableTwoWay(col)).removedMirror ?? removedMirror;
+        }
+        changed.push("twoWay");
+      }
+
+      if (parsed.name !== undefined && parsed.name !== col.name) {
+        if (ctx.columnDefs.some(c => c.id !== col.id && c.name === parsed.name)) {
+          throw new Error(`Column '${parsed.name}' already exists`);
+        }
+        const users = formulaColumnsUsing(ctx, col.name);
+        if (users.length) {
+          warnings.push(`Formula column(s) ${users.join(", ")} mention "${col.name}"; update their expressions to the new name`);
+        }
+        raw.set("name", parsed.name);
+        changed.push("name");
+      }
+
+      if (parsed.width !== undefined) {
+        raw.set("width", parsed.width);
+        forEachViewMap(ctx.dbBlock, view => {
+          databaseArrayValues(view.get("columns")).forEach(entry => {
+            if (entry instanceof Y.Map && entry.get("id") === col.id) entry.set("width", parsed.width);
+          });
+        });
+        changed.push("width");
+      }
+
+      if (!changed.length) throw new Error("Nothing to change: pass name, width, type, relationTarget, twoWay, expression or resultType");
+
+      const otherDocsUpdated = await pushDatabaseChanges(workspaceId, parsed.docId, ctx, session);
+      return text({
+        updated: true,
+        columnId: col.id,
+        name: String(raw.get("name") ?? ""),
+        type: String(raw.get("type") ?? ""),
+        changed,
+        conversion,
+        mirrorColumnId,
+        removedMirror,
+        otherDocsUpdated,
+        warnings,
+      });
+    } finally {
+      ctx.socket.disconnect();
+    }
+  };
+  server.registerTool(
+    "update_database_column",
+    {
+      title: "Update Database Column",
+      description: "Rename, resize, or change the type of an AFFiNE database column; set a relation column's target database or two-way mirror; set a formula column's expression. Changing the type converts cell values where possible (text, numbers, option labels, dates, checkboxes) and clears the rest; the result lists how many cells were converted or cleared. The title column's type cannot change.",
+      inputSchema: {
+        workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+        docId: DocId.describe("Document ID containing the database"),
+        databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+        column: z.string().min(1).describe("Column name or ID"),
+        name: z.string().min(1).optional().describe("New column name"),
+        width: z.number().optional().describe("New column width in pixels (all views)"),
+        type: z.enum(DATABASE_COLUMN_TYPE_VALUES).optional().describe("New column type"),
+        relationTarget: RelationTargetInput.optional().describe("Relation columns: the database whose rows the column links"),
+        twoWay: z.boolean().optional().describe("Relation columns: true adds a mirror column to the target database; false deletes it"),
+        expression: z.string().optional().describe("Formula columns: the new formula. Syntax: https://github.com/Jim3878/AFFiNE/blob/nineday/docs/formula.md"),
+        resultType: z.enum(FORMULA_RESULT_TYPE_VALUES).optional().describe("Formula columns: type of the results"),
+      },
+    },
+    updateDatabaseColumnHandler as any
+  );
+
+  // UPDATE SELECT OPTIONS
+  const updateSelectOptionsHandler = async (parsed: {
+    workspaceId?: string;
+    docId: string;
+    databaseBlockId: string;
+    column: string;
+    add?: Array<{ value: string; color?: string }>;
+    rename?: Array<{ option: string; value: string }>;
+    recolor?: Array<{ option: string; color: string }>;
+    remove?: string[];
+  }) => {
+    const workspaceId = parsed.workspaceId || defaults.workspaceId;
+    if (!workspaceId) throw new Error("workspaceId is required");
+    const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+    try {
+      const col = requireColumn(ctx, parsed.column);
+      if (col.type !== "select" && col.type !== "multi-select") {
+        throw new Error(`Column "${col.name}" is a ${col.type} column, not select or multi-select`);
+      }
+      const options = col.options.map(option => ({ ...option }));
+      const find = (key: string) => {
+        const option = options.find(o => o.id === key) ?? options.find(o => o.value === key);
+        if (!option) throw new Error(`Column "${col.name}": option "${key}" not found. Options: ${options.map(o => o.value).join(", ")}`);
+        return option;
+      };
+      const colorOf = (color: string) => {
+        if (SELECT_COLORS.includes(color)) return color;
+        const named = `var(--affine-tag-${color.toLowerCase()})`;
+        if (SELECT_COLORS.includes(named)) return named;
+        throw new Error(`Unknown color "${color}". Use one of: ${SELECT_COLORS.map(c => c.slice(17, -1)).join(", ")}`);
+      };
+
+      const removedIds = new Set((parsed.remove ?? []).map(key => find(key).id));
+      for (const { option, value } of parsed.rename ?? []) {
+        const target = find(option);
+        if (options.some(o => o !== target && o.value === value && !removedIds.has(o.id))) {
+          throw new Error(`Column "${col.name}": option "${value}" already exists`);
+        }
+        target.value = value;
+      }
+      for (const { option, color } of parsed.recolor ?? []) find(option).color = colorOf(color);
+      const kept = options.filter(o => !removedIds.has(o.id));
+      const added: string[] = [];
+      for (const { value, color } of parsed.add ?? []) {
+        if (kept.some(o => o.value === value)) continue;
+        kept.push({ id: generateId(), value, color: color ? colorOf(color) : SELECT_COLORS[kept.length % SELECT_COLORS.length]! });
+        added.push(value);
+      }
+
+      let clearedCells = 0;
+      if (removedIds.size) {
+        ctx.cellsMap.forEach((rowCells: unknown) => {
+          if (!(rowCells instanceof Y.Map)) return;
+          const cell = rowCells.get(col.id);
+          if (cell === undefined) return;
+          const value = databaseRecordValue(cell, "value");
+          if (col.type === "select") {
+            if (typeof value === "string" && removedIds.has(value)) {
+              rowCells.delete(col.id);
+              clearedCells += 1;
+            }
+            return;
+          }
+          const ids = databaseArrayValues(value).map(String);
+          if (!ids.some(id => removedIds.has(id))) return;
+          const next = new Y.Map<any>();
+          next.set("columnId", col.id);
+          const array = new Y.Array<string>();
+          array.push(ids.filter(id => !removedIds.has(id)));
+          next.set("value", array);
+          rowCells.set(col.id, next);
+          clearedCells += 1;
+        });
+      }
+
+      setColumnData(col, { ...columnDataOf(col), options: kept });
+      await pushDatabaseChanges(workspaceId, parsed.docId, ctx);
+      return text({
+        updated: true,
+        columnId: col.id,
+        options: kept,
+        added,
+        removed: [...removedIds].map(id => col.options.find(o => o.id === id)?.value ?? id),
+        cellsUpdated: clearedCells,
+      });
+    } finally {
+      ctx.socket.disconnect();
+    }
+  };
+  server.registerTool(
+    "update_select_options",
+    {
+      title: "Update Select Options",
+      description: "Add, rename, recolor, or remove options of a select or multi-select database column. Renaming keeps every cell that uses the option. Removing an option also removes it from every cell (select cells become empty). Options are matched by label or option ID.",
+      inputSchema: {
+        workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+        docId: DocId.describe("Document ID containing the database"),
+        databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+        column: z.string().min(1).describe("Column name or ID"),
+        add: z.array(z.object({ value: z.string().min(1), color: z.string().optional() })).optional().describe("Options to add (existing labels are skipped)"),
+        rename: z.array(z.object({ option: z.string().min(1), value: z.string().min(1) })).optional().describe("Options to rename: option (label or ID) -> new label"),
+        recolor: z.array(z.object({ option: z.string().min(1), color: z.string().min(1) })).optional().describe("Options to recolor: blue, green, red, orange, purple, yellow, teal, pink, gray"),
+        remove: z.array(z.string().min(1)).optional().describe("Options (label or ID) to delete; they are also removed from cells"),
+      },
+    },
+    updateSelectOptionsHandler as any
+  );
+
+  // DELETE DATABASE COLUMN
+  const deleteDatabaseColumnHandler = async (parsed: {
+    workspaceId?: string;
+    docId: string;
+    databaseBlockId: string;
+    column: string;
+  }) => {
+    const workspaceId = parsed.workspaceId || defaults.workspaceId;
+    if (!workspaceId) throw new Error("workspaceId is required");
+    const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+    try {
+      const col = requireColumn(ctx, parsed.column);
+      if (col.type === "title") throw new Error("The title column cannot be deleted");
+      const session = createRelationSession(workspaceId, parsed.docId, ctx);
+      const warnings: string[] = [];
+      let removedMirror: string | null = null;
+      if (col.type === "relation") {
+        removedMirror = (await session.disableTwoWay(col)).removedMirror;
+      }
+      const users = formulaColumnsUsing(ctx, col.name).filter(name => name !== (col.name || col.id));
+      if (users.length) warnings.push(`Formula column(s) ${users.join(", ")} mention "${col.name}" and will show errors`);
+      const clearedCells = removeDatabaseColumn(ctx, col.id);
+      const otherDocsUpdated = await pushDatabaseChanges(workspaceId, parsed.docId, ctx, session);
+      return text({
+        deleted: true,
+        columnId: col.id,
+        name: col.name,
+        type: col.type,
+        clearedCells,
+        removedMirror,
+        otherDocsUpdated,
+        warnings,
+      });
+    } finally {
+      ctx.socket.disconnect();
+    }
+  };
+  server.registerTool(
+    "delete_database_column",
+    {
+      title: "Delete Database Column",
+      description: "Delete a column from an AFFiNE database block, together with its cells and its place in every view. Deleting a two-way relation column also deletes its mirror column in the target database. The title column cannot be deleted. Recoverable from the doc's page history.",
+      inputSchema: {
+        workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+        docId: DocId.describe("Document ID containing the database"),
+        databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+        column: z.string().min(1).describe("Column name or ID"),
+      },
+    },
+    deleteDatabaseColumnHandler as any
   );
 
   type SurfaceElementType = "shape" | "connector" | "text" | "group";

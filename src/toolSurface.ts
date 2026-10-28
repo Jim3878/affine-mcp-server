@@ -30,6 +30,7 @@ export const ALL_TOOLS = [
   "delete_collection",
   "delete_comment",
   "delete_custom_property",
+  "delete_database_column",
   "delete_database_row",
   "delete_doc",
   "delete_folder",
@@ -92,6 +93,7 @@ export const ALL_TOOLS = [
   "update_collection",
   "update_collection_rules",
   "update_comment",
+  "update_database_column",
   "update_database_row",
   "update_doc_icon",
   "update_doc_title",
@@ -100,6 +102,7 @@ export const ALL_TOOLS = [
   "update_frame_children",
   "update_mindmap_node",
   "update_profile",
+  "update_select_options",
   "update_settings",
   "update_surface_element",
   "update_table_cell",
@@ -128,6 +131,9 @@ const TOOL_GROUPS: Record<ToolName, readonly string[]> = {
   update_mindmap_node: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
   add_database_column: ["docs", "docs.database", "docs.write", "write"],
   add_database_row: ["docs", "docs.database", "docs.write", "write"],
+  delete_database_column: ["docs", "docs.database", "docs.write", "write"],
+  update_database_column: ["docs", "docs.database", "docs.write", "write"],
+  update_select_options: ["docs", "docs.database", "docs.write", "write"],
   add_doc_to_collection: ["organize", "organize.collections", "organize.write", "write"],
   add_organize_link: ["organize", "organize.folders", "organize.write", "experimental", "write"],
   add_surface_element: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
@@ -307,6 +313,13 @@ const AUTHORING_EXCLUDED_GROUPS = new Set([
   "experimental",
 ]);
 
+// NineDay: deletes data but stays out of the "destructive" group, so the authoring profile
+// keeps it (deleted columns can be restored from the doc's page history).
+const DESTRUCTIVE_HINT_TOOLS = new Set<ToolName>([
+  "delete_database_column",
+  "update_select_options",
+]);
+
 const IDEMPOTENT_WRITE_TOOLS = new Set<ToolName>([
   "restore_doc",
   "set_doc_journal",
@@ -439,7 +452,7 @@ export function toolAnnotationsFor(name: string): ToolAnnotations {
 
   const groups = TOOL_GROUPS[toolName];
   const isReadOnly = groups.includes("read") && !groups.includes("write") && !groups.includes("destructive");
-  const isDestructive = groups.includes("destructive");
+  const isDestructive = groups.includes("destructive") || DESTRUCTIVE_HINT_TOOLS.has(toolName);
 
   return {
     readOnlyHint: isReadOnly,
