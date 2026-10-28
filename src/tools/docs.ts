@@ -9331,6 +9331,12 @@ export function registerDocTools(
     return clearedCells;
   }
 
+  /** A row's title, for the receipts that list deleted values. */
+  function rowTitleOf(blocks: Y.Map<any>, rowId: string): string | null {
+    const rowBlock = findBlockById(blocks, rowId);
+    return rowBlock ? richTextValueToString(rowBlock.get("prop:text")) || null : null;
+  }
+
   function formulaColumnsUsing(lookup: DatabaseColumnLookup, name: string): string[] {
     return lookup.columnDefs
       .filter(col => col.type === "formula" && String(columnDataOf(col).expression ?? "").includes(name))
@@ -9766,7 +9772,12 @@ export function registerDocTools(
     col: DatabaseColumnDef,
     toType: string,
     newData: ColumnData,
-  ): Promise<{ data: ColumnData; converted: number; cleared: number }> {
+  ): Promise<{
+    data: ColumnData;
+    converted: number;
+    cleared: number;
+    clearedValues: Array<{ rowBlockId: string; title: string | null; value: string[] }>;
+  }> {
     const rows = getDatabaseRowIds(ctx.dbBlock);
     const options = new Map<string, { id: string; value: string; color: string }>();
     // select <-> multi-select keeps option ids.
@@ -9783,6 +9794,8 @@ export function registerDocTools(
     };
 
     const values: Array<[string, unknown]> = [];
+    // Values lost in the conversion, returned so a wrong change can be undone by hand.
+    const clearedValues: Array<{ rowBlockId: string; title: string | null; value: string[] }> = [];
     let cleared = 0;
     for (const rowId of rows) {
       const rowCells = ctx.cellsMap.get(rowId);
@@ -9820,6 +9833,7 @@ export function registerDocTools(
       }
       if (next === undefined || (Array.isArray(next) && !next.length)) {
         cleared += 1;
+        clearedValues.push({ rowBlockId: rowId, title: rowTitleOf(ctx.blocks, rowId), value: strings });
         continue;
       }
       values.push([rowId, next]);
@@ -9839,7 +9853,7 @@ export function registerDocTools(
     const data = toType === "select" || toType === "multi-select"
       ? { ...newData, options: [...options.values()] }
       : newData;
-    return { data, converted: values.length, cleared };
+    return { data, converted: values.length, cleared, clearedValues };
   }
 
   const updateDatabaseColumnHandler = async (parsed: {
@@ -9864,7 +9878,11 @@ export function registerDocTools(
       const raw = rawColumnMap(col);
       const changed: string[] = [];
       const warnings: string[] = [];
-      let conversion: { converted: number; cleared: number } | null = null;
+      let conversion: {
+        converted: number;
+        cleared: number;
+        clearedValues: Array<{ rowBlockId: string; title: string | null; value: string[] }>;
+      } | null = null;
       let mirrorColumnId: string | null = null;
       let removedMirror: string | null = null;
 
@@ -9889,7 +9907,7 @@ export function registerDocTools(
         raw.set("type", parsed.type);
         raw.set("data", toYValue(result.data));
         col.type = parsed.type;
-        conversion = { converted: result.converted, cleared: result.cleared };
+        conversion = { converted: result.converted, cleared: result.cleared, clearedValues: result.clearedValues };
         changed.push("type");
         if (result.cleared) {
           warnings.push(`${result.cleared} cell(s) could not be converted to ${parsed.type} and were cleared`);
@@ -9976,7 +9994,7 @@ export function registerDocTools(
     "update_database_column",
     {
       title: "Update Database Column",
-      description: "Rename, resize, or change the type of an AFFiNE database column; set a relation column's target database or two-way mirror; set a formula column's expression. Changing the type converts cell values where possible (text, numbers, option labels, dates, checkboxes) and clears the rest; the result lists how many cells were converted or cleared. The title column's type cannot change.",
+      description: "Rename, resize, or change the type of an AFFiNE database column; set a relation column's target database or two-way mirror; set a formula column's expression. Changing the type converts cell values where possible (text, numbers, option labels, dates, checkboxes) and clears the rest; the result lists how many cells were converted or cleared, and the cleared values (conversion.clearedValues). The title column's type cannot change.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -10044,8 +10062,11 @@ export function registerDocTools(
       }
 
       let clearedCells = 0;
+      // Which rows held a removed option, returned so a wrong removal can be undone by hand.
+      const removedFrom: Array<{ rowBlockId: string; title: string | null; options: string[] }> = [];
+      const labelOf = (id: string) => col.options.find(o => o.id === id)?.value ?? id;
       if (removedIds.size) {
-        ctx.cellsMap.forEach((rowCells: unknown) => {
+        ctx.cellsMap.forEach((rowCells: unknown, rowId: string) => {
           if (!(rowCells instanceof Y.Map)) return;
           const cell = rowCells.get(col.id);
           if (cell === undefined) return;
@@ -10054,11 +10075,17 @@ export function registerDocTools(
             if (typeof value === "string" && removedIds.has(value)) {
               rowCells.delete(col.id);
               clearedCells += 1;
+              removedFrom.push({ rowBlockId: rowId, title: rowTitleOf(ctx.blocks, rowId), options: [labelOf(value)] });
             }
             return;
           }
           const ids = databaseArrayValues(value).map(String);
           if (!ids.some(id => removedIds.has(id))) return;
+          removedFrom.push({
+            rowBlockId: rowId,
+            title: rowTitleOf(ctx.blocks, rowId),
+            options: ids.filter(id => removedIds.has(id)).map(labelOf),
+          });
           const next = new Y.Map<any>();
           next.set("columnId", col.id);
           const array = new Y.Array<string>();
@@ -10078,6 +10105,7 @@ export function registerDocTools(
         added,
         removed: [...removedIds].map(id => col.options.find(o => o.id === id)?.value ?? id),
         cellsUpdated: clearedCells,
+        removedFrom,
       });
     } finally {
       ctx.socket.disconnect();
@@ -10087,7 +10115,7 @@ export function registerDocTools(
     "update_select_options",
     {
       title: "Update Select Options",
-      description: "Add, rename, recolor, or remove options of a select or multi-select database column. Renaming keeps every cell that uses the option. Removing an option also removes it from every cell (select cells become empty). Options are matched by label or option ID.",
+      description: "Add, rename, recolor, or remove options of a select or multi-select database column. Renaming keeps every cell that uses the option. Removing an option also removes it from every cell (select cells become empty); the result lists those rows (removedFrom) so a mistaken removal can be undone. Options are matched by label or option ID.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -10117,12 +10145,37 @@ export function registerDocTools(
       if (col.type === "title") throw new Error("The title column cannot be deleted");
       const session = createRelationSession(workspaceId, parsed.docId, ctx);
       const warnings: string[] = [];
+      const users = formulaColumnsUsing(ctx, col.name).filter(name => name !== (col.name || col.id));
+      if (users.length) warnings.push(`Formula column(s) ${users.join(", ")} mention "${col.name}" and will show errors`);
+      // The column and its values as they were, returned so a wrong delete can be redone by hand.
+      const deletedColumn = {
+        name: col.name,
+        type: col.type,
+        width: rawColumnMap(col).get("width") ?? null,
+        data: columnDataOf(col),
+      };
+      const deletedCells: Array<{ rowBlockId: string; title: string | null; value: unknown }> = [];
+      for (const rowId of getDatabaseRowIds(ctx.dbBlock)) {
+        let value: unknown;
+        if (col.type === "relation") {
+          const related = await session.describe(session.ownDb(), rowId, col);
+          value = related.length ? related : undefined;
+        } else if (col.type !== "formula") {
+          const rowCells = ctx.cellsMap.get(rowId);
+          const entry = rowCells instanceof Y.Map ? rowCells.get(col.id) : undefined;
+          if (entry !== undefined) {
+            const decoded = decodeDatabaseCellValue(col, entry);
+            value = col.type === "rich-text" ? { value: decoded.value, deltas: decoded.deltas } : decoded.value;
+          }
+        }
+        if (value !== undefined && value !== null) {
+          deletedCells.push({ rowBlockId: rowId, title: rowTitleOf(ctx.blocks, rowId), value });
+        }
+      }
       let removedMirror: string | null = null;
       if (col.type === "relation") {
         removedMirror = (await session.disableTwoWay(col)).removedMirror;
       }
-      const users = formulaColumnsUsing(ctx, col.name).filter(name => name !== (col.name || col.id));
-      if (users.length) warnings.push(`Formula column(s) ${users.join(", ")} mention "${col.name}" and will show errors`);
       const clearedCells = removeDatabaseColumn(ctx, col.id);
       const otherDocsUpdated = await pushDatabaseChanges(workspaceId, parsed.docId, ctx, session);
       return text({
@@ -10134,6 +10187,8 @@ export function registerDocTools(
         removedMirror,
         otherDocsUpdated,
         warnings,
+        deletedColumn,
+        deletedCells,
       });
     } finally {
       ctx.socket.disconnect();
@@ -10143,7 +10198,7 @@ export function registerDocTools(
     "delete_database_column",
     {
       title: "Delete Database Column",
-      description: "Delete a column from an AFFiNE database block, together with its cells and its place in every view. Deleting a two-way relation column also deletes its mirror column in the target database. The title column cannot be deleted. Recoverable from the doc's page history.",
+      description: "Delete a column from an AFFiNE database block, together with its cells and its place in every view. Deleting a two-way relation column also deletes its mirror column in the target database. The title column cannot be deleted. The result includes the deleted column definition (deletedColumn) and every row's previous value (deletedCells); keep them to recreate the column if the delete was a mistake (page history keeps at most one snapshot per 10 minutes, so it may miss recent edits).",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
