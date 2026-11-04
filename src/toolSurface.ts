@@ -313,6 +313,13 @@ const AUTHORING_EXCLUDED_GROUPS = new Set([
   "experimental",
 ]);
 
+// NineDay: read-only experimental tools the authoring profile still exposes, so agents can
+// see which sidebar folder a doc lives in. Folder writes stay excluded.
+const AUTHORING_EXPERIMENTAL_ALLOWED = new Set<ToolName>([
+  "get_folder_icon",
+  "list_organize_nodes",
+]);
+
 // NineDay: deletes data but stays out of the "destructive" group, so the authoring profile
 // keeps it (deleted columns can be restored from the doc's page history).
 const DESTRUCTIVE_HINT_TOOLS = new Set<ToolName>([
@@ -375,6 +382,9 @@ function profileAllowsTool(profile: ToolProfile, toolName: ToolName): boolean {
   }
   if (profile === "core") {
     return CORE_TOOLS.has(toolName);
+  }
+  if (AUTHORING_EXPERIMENTAL_ALLOWED.has(toolName)) {
+    return true;
   }
   const groups = TOOL_GROUPS[toolName];
   return !groups.some(group => AUTHORING_EXCLUDED_GROUPS.has(group));
