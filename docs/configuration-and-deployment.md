@@ -125,6 +125,9 @@ These controls are environment-only and are not read from the saved config file.
 | `AFFINE_TOOL_PROFILE` | Environment-only predefined tool surface profile (`full`, `read_only`, `core`, `authoring`) |
 | `AFFINE_DISABLED_GROUPS` | Environment-only comma-separated tool groups to disable |
 | `AFFINE_DISABLED_TOOLS` | Environment-only exact canonical tool names to disable |
+| `AFFINE_MCP_EXTENSIONS` | NineDay: extra extension module paths to load, separated by `;` (bundled `extensions/*/index.js` always load) |
+| `AFFINE_MCP_EXTENSIONS_DISABLE` | NineDay: set to `1` to load no extensions at all |
+| `AFFINE_DISABLED_EXTENSION_TOOLS` | NineDay: comma-separated extension tool names to disable (for example `sf_write_playscript`) |
 
 ### HTTP mode
 

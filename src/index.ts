@@ -18,6 +18,7 @@ import { registerOrganizeTools } from "./tools/organize.js";
 import { registerPropertyTools } from "./tools/properties.js";
 import { registerIconTools } from "./tools/icons.js";
 import { runCli } from "./cli.js";
+import { createExtensionHost, extensionToolAllowed, loadExtensions } from "./extensions.js";
 import { startHttpMcpServer } from "./sse.js";
 import { existsSync } from "fs";
 import { createToolFilter, toolAnnotationsFor } from "./toolSurface.js";
@@ -43,6 +44,33 @@ if (subcommand === "--help" || subcommand === "-h") {
   process.exit(0);
 }
 if (subcommand) {
+  // NineDay: an extension can own a CLI subcommand (for example `affine-mcp sf pull`).
+  const extensionCli = (await loadExtensions()).find(ext => ext.cli?.command === subcommand);
+  if (extensionCli?.cli) {
+    try {
+      const cliConfig = loadConfig();
+      const cliAuth = resolveConfiguredAuth(cliConfig);
+      const cliSession = new AuthSession({
+        baseUrl: cliConfig.baseUrl,
+        bearer: cliAuth.apiToken,
+        cookie: cliAuth.cookie,
+        email: cliAuth.apiToken || cliAuth.cookie ? undefined : cliAuth.email,
+        password: cliAuth.apiToken || cliAuth.cookie ? undefined : cliAuth.password,
+        headers: cliAuth.headers,
+      });
+      const cliGql = new GraphQLClient({
+        endpoint: cliConfig.graphqlEndpoint,
+        baseUrl: cliConfig.baseUrl,
+        headers: { ...(cliConfig.headers || {}) },
+        authProvider: () => cliSession.ready(),
+      });
+      await extensionCli.cli.run(cliArgs.slice(1), createExtensionHost({ gql: cliGql, defaultWorkspaceId: cliConfig.defaultWorkspaceId }));
+      process.exit(0);
+    } catch (error) {
+      console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  }
   const handled = await runCli(subcommand, cliArgs.slice(1));
   if (!handled) {
     console.error(`Unknown command: ${subcommand}`);
@@ -203,6 +231,28 @@ async function buildServer() {
   }
   registerBlobTools(server, gql);
   registerNotificationTools(server, gql);
+
+  // NineDay: extension tools bypass the canonical manifest (they are not upstream tools), but still go
+  // through the profile check, error wrapping and annotations.
+  for (const ext of await loadExtensions()) {
+    const host = createExtensionHost({
+      gql,
+      defaultWorkspaceId: config.defaultWorkspaceId,
+      registerTool: (name, options, handler, flags) => {
+        if (!extensionToolAllowed(toolFilter.profile, flags.readOnly, name)) return;
+        originalRegisterTool(name, {
+          ...options,
+          annotations: { readOnlyHint: flags.readOnly, destructiveHint: false, openWorldHint: false },
+        }, withToolErrors(handler as any, { toolName: name, authMode: config.authMode, readOnly: flags.readOnly }));
+      },
+    });
+    try {
+      ext.register(host);
+      console.error(`[affine-mcp] Extension loaded: ${ext.name} ${ext.version}`);
+    } catch (error) {
+      console.error(`[affine-mcp] Extension ${ext.name} failed to register: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   stripSchemaDialect(server);
   return server;
 }
