@@ -25,6 +25,8 @@ export type ExtensionDocSession = {
   workspaceId: string;
   load(docId: string): Promise<Y.Doc>;
   push(docId: string, doc: Y.Doc, before: Uint8Array): Promise<void>;
+  /** docId -> last update time (server ms) for every doc changed after `since` (0 = all docs). */
+  timestamps(since: number): Promise<Record<string, number>>;
   close(): void;
 };
 
@@ -135,6 +137,12 @@ export function createExtensionHost(options: {
           const decoded = Y.decodeUpdate(update);
           if (decoded.structs.length === 0 && decoded.ds.clients.size === 0) return;
           await pushDocUpdate(socket, ws, docId, Buffer.from(update).toString("base64"));
+        },
+        async timestamps(since: number) {
+          const ack: any = await new Promise(resolve =>
+            socket.emit("space:load-doc-timestamps", { spaceType: "workspace", spaceId: ws, timestamp: since }, resolve));
+          if (ack?.error) throw new Error(ack.error.message || "load-doc-timestamps failed");
+          return (ack?.data ?? {}) as Record<string, number>;
         },
         close() {
           socket.disconnect();
