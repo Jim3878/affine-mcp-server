@@ -8,3 +8,7 @@ committed here:
 
 `AFFINE_MCP_EXTENSIONS=<path>;<path>` loads extra extensions while developing one;
 `AFFINE_MCP_EXTENSIONS_DISABLE=1` turns all of them off.
+
+Host API an extension gets (`ExtensionHostContext`, `src/extensions.ts`): the host's `Y` and `z`, `openSession()`
+(doc `load` / `push`, `timestamps`, `presence(docId)` for a doc's awareness room, `alive()`, `close`),
+`currentUser()` and `registerTool`.

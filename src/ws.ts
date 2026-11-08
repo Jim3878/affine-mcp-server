@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { ToolFailure } from "./util/mcp.js";
 
 export type WorkspaceSocket = Socket<any, any>;
-const DEFAULT_WS_CLIENT_VERSION = process.env.AFFINE_WS_CLIENT_VERSION || process.env.AFFINE_CLIENT_VERSION || '0.26.0';
+export const DEFAULT_WS_CLIENT_VERSION = process.env.AFFINE_WS_CLIENT_VERSION || process.env.AFFINE_CLIENT_VERSION || '0.26.0';
 const WS_CONNECT_TIMEOUT_MS = Number(process.env.AFFINE_WS_CONNECT_TIMEOUT_MS || 10000);
 const WS_ACK_TIMEOUT_MS = Number(process.env.AFFINE_WS_ACK_TIMEOUT_MS || 10000);
 const WORKSPACE_METADATA_RETRY_DELAYS_MS = [500, 1000, 2000];

@@ -16,7 +16,7 @@ import * as Y from "yjs";
 import { z } from "zod";
 
 import type { GraphQLClient } from "./graphqlClient.js";
-import { connectWorkspaceSocket, joinWorkspace, loadDoc, pushDocUpdate, wsUrlFromGraphQLEndpoint } from "./ws.js";
+import { connectWorkspaceSocket, DEFAULT_WS_CLIENT_VERSION, joinWorkspace, loadDoc, pushDocUpdate, wsUrlFromGraphQLEndpoint } from "./ws.js";
 import { VERSION } from "./config.js";
 
 export type ExtensionToolResult = { content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean };
@@ -27,7 +27,24 @@ export type ExtensionDocSession = {
   push(docId: string, doc: Y.Doc, before: Uint8Array): Promise<void>;
   /** docId -> last update time (server ms) for every doc changed after `since` (0 = all docs). */
   timestamps(since: number): Promise<Record<string, number>>;
+  /**
+   * Joins a doc's awareness room (the id the web client uses: the local id, e.g. `db$sf.flowgraph.main`).
+   * Updates are y-protocols awareness updates; encoding them is the extension's job.
+   */
+  presence(docId: string): Promise<ExtensionPresenceChannel>;
+  /** False once the socket dropped; a reconnected socket has left the workspace and its awareness rooms. */
+  alive(): boolean;
   close(): void;
+};
+
+export type ExtensionPresenceChannel = {
+  /** Sends an awareness update to everyone in the room. */
+  send(update: Uint8Array): void;
+  /** Awareness updates from others. */
+  onUpdate(cb: (update: Uint8Array) => void): void;
+  /** Someone joined and asks everybody to resend their state. */
+  onCollect(cb: () => void): void;
+  leave(): void;
 };
 
 export type ExtensionHostContext = {
@@ -36,6 +53,8 @@ export type ExtensionHostContext = {
   hostVersion: string;
   defaultWorkspaceId?: string;
   openSession(workspaceId?: string): Promise<ExtensionDocSession>;
+  /** The signed-in account's display name (and email), for showing who an AI is working for. */
+  currentUser(): Promise<{ name: string; email: string }>;
   registerTool(
     name: string,
     options: { title: string; description: string; inputSchema: Record<string, unknown> },
@@ -124,6 +143,8 @@ export function createExtensionHost(options: {
         socket.disconnect();
         throw error;
       }
+      let dropped = false;
+      socket.on("disconnect", () => { dropped = true; });
       return {
         workspaceId: ws,
         async load(docId: string) {
@@ -144,10 +165,49 @@ export function createExtensionHost(options: {
           if (ack?.error) throw new Error(ack.error.message || "load-doc-timestamps failed");
           return (ack?.data ?? {}) as Record<string, number>;
         },
+        async presence(docId: string) {
+          const room = { spaceType: "workspace", spaceId: ws, docId };
+          const updates: ((u: Uint8Array) => void)[] = [];
+          const collects: (() => void)[] = [];
+          const onBroadcast = (m: any) => {
+            if (m?.spaceId !== ws || m?.docId !== docId || typeof m.awarenessUpdate !== "string") return;
+            const bin = new Uint8Array(Buffer.from(m.awarenessUpdate, "base64"));
+            for (const cb of updates) cb(bin);
+          };
+          const onCollectAsk = (m: any) => {
+            if (m?.spaceId !== ws || m?.docId !== docId) return;
+            for (const cb of collects) cb();
+          };
+          socket.on("space:broadcast-awareness-update", onBroadcast);
+          socket.on("space:collect-awareness", onCollectAsk);
+          const ack: any = await socket.emitWithAck("space:join-awareness", { ...room, clientVersion: DEFAULT_WS_CLIENT_VERSION });
+          if (ack?.error) throw new Error(ack.error.message || "join-awareness failed");
+          socket.emit("space:load-awarenesses", room);
+          return {
+            send(update: Uint8Array) {
+              socket.emit("space:update-awareness", { ...room, awarenessUpdate: Buffer.from(update).toString("base64") });
+            },
+            onUpdate(cb) { updates.push(cb); },
+            onCollect(cb) { collects.push(cb); },
+            leave() {
+              socket.off("space:broadcast-awareness-update", onBroadcast);
+              socket.off("space:collect-awareness", onCollectAsk);
+              socket.emit("space:leave-awareness", room);
+            },
+          };
+        },
+        alive() {
+          return !dropped && socket.connected;
+        },
         close() {
           socket.disconnect();
         },
       };
+    },
+    async currentUser() {
+      const data = await gql.request<{ currentUser: { name?: string; email?: string } | null }>("query { currentUser { name email } }");
+      const email = data.currentUser?.email ?? "";
+      return { name: data.currentUser?.name || email.split("@")[0] || "AI", email };
     },
     registerTool: options.registerTool ?? (() => {
       throw new Error("registerTool is only available in MCP server mode.");
