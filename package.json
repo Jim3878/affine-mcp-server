@@ -1,6 +1,6 @@
 {
   "name": "affine-mcp-server",
-  "version": "3.10.1-nineday.4",
+  "version": "3.10.1-nineday.5",
   "private": false,
   "type": "module",
   "description": "Model Context Protocol server for AFFiNE - enables AI assistants to interact with AFFiNE workspaces, documents, and collaboration features.",
@@ -111,7 +111,6 @@
   "files": [
     "bin",
     "dist",
-    "extensions",
     "docs",
     "README.md",
     "CONTRIBUTING.md",
@@ -128,7 +127,14 @@
   "publishConfig": {
     "access": "public"
   },
+  "affineMcpExtensions": [
+    "@nineday/storyforge-cloud"
+  ],
+  "bundleDependencies": [
+    "@nineday/storyforge-cloud"
+  ],
   "dependencies": {
+    "@nineday/storyforge-cloud": "1.1.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",

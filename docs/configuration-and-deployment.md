@@ -125,9 +125,25 @@ These controls are environment-only and are not read from the saved config file.
 | `AFFINE_TOOL_PROFILE` | Environment-only predefined tool surface profile (`full`, `read_only`, `core`, `authoring`) |
 | `AFFINE_DISABLED_GROUPS` | Environment-only comma-separated tool groups to disable |
 | `AFFINE_DISABLED_TOOLS` | Environment-only exact canonical tool names to disable |
-| `AFFINE_MCP_EXTENSIONS` | NineDay: extra extension module paths to load, separated by `;` (bundled `extensions/*/index.js` always load) |
+| `AFFINE_MCP_EXTENSIONS` | NineDay: extra extension module paths to load, separated by `;` (the packages listed in package.json `affineMcpExtensions`, such as `@nineday/storyforge-cloud`, always load) |
 | `AFFINE_MCP_EXTENSIONS_DISABLE` | NineDay: set to `1` to load no extensions at all |
 | `AFFINE_DISABLED_EXTENSION_TOOLS` | NineDay: comma-separated extension tool names to disable (for example `sf_write_playscript`) |
+
+### Extensions (NineDay)
+
+An extension is an npm package whose default export is `{ name, version, register(ctx), cli? }`
+(`src/extensions.ts`). Every package named in package.json `affineMcpExtensions` is imported at startup.
+Each one is also a dependency pinned to an exact version and listed in `bundleDependencies`, so the
+packed tgz contains it and its sha256 covers the extension code too:
+
+- `@nineday/storyforge-cloud`: StoryForge's `sf_*` tools and the `affine-mcp sf …` CLI, built from
+  `cloud/` in the StoryForge repo. To take a new version, bump the exact version here and run `npm install`.
+
+While developing an extension, `AFFINE_MCP_EXTENSIONS=<path>;<path>` loads it from a local build.
+
+Host API an extension gets (`ExtensionHostContext`): the host's `Y` and `z`, `openSession()` (doc
+`load` / `push`, `timestamps`, `presence(docId)` for a doc's awareness room, `alive()`, `close`),
+`currentUser()` and `registerTool`.
 
 ### HTTP mode
 

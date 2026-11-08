@@ -16,6 +16,11 @@ const MANIFEST_TOOLS = JSON.parse(
 ).tools;
 const execFileAsync = promisify(execFile);
 
+// NineDay: this test checks the canonical tool surface against tool-manifest.json. Extension tools
+// (the sf_* tools of @nineday/storyforge-cloud, a regular dependency) are outside that manifest by design,
+// so every server this test starts runs without extensions; they inherit process.env.
+process.env.AFFINE_MCP_EXTENSIONS_DISABLE = "1";
+
 async function listToolEntries(env = {}) {
   const client = new Client(
     { name: "test-client", version: "1.0.0" },

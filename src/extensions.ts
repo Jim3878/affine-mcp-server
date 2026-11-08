@@ -4,12 +4,14 @@
 // workspace docs (including db$<ws>$... module docs) without bundling its own copies.
 //
 // Where extensions come from:
-//   - every <package root>/extensions/<name>/index.js shipped inside this package (the tgz for partners);
+//   - every package named in this package's package.json "affineMcpExtensions" list, imported from
+//     node_modules like any dependency (each one is also listed in "dependencies" with an exact version,
+//     so the tgz for partners pulls it in and package-lock.json records which build it is);
 //   - extra module paths in AFFINE_MCP_EXTENSIONS (separated by ";"), for developing an extension.
 // AFFINE_MCP_EXTENSIONS_DISABLE=1 turns all of them off; AFFINE_DISABLED_EXTENSION_TOOLS (comma list)
 // turns off single extension tools.
 
-import { existsSync, readdirSync } from "fs";
+import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import * as Y from "yjs";
@@ -75,19 +77,25 @@ function packageRoot() {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
+/** Package names from package.json "affineMcpExtensions". */
+export function listedExtensionPackages(): string[] {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(packageRoot(), "package.json"), "utf8"));
+    const list = pkg.affineMcpExtensions;
+    return Array.isArray(list) ? list.filter((x: unknown): x is string => typeof x === "string" && x.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Each entry is an import specifier: a package name (resolved from this package's node_modules, since
+// import() resolves relative to this file) or a file URL for a path given in AFFINE_MCP_EXTENSIONS.
 function extensionEntryPoints(env: NodeJS.ProcessEnv): string[] {
   if (env.AFFINE_MCP_EXTENSIONS_DISABLE === "1") return [];
-  const entries: string[] = [];
-  const bundled = path.join(packageRoot(), "extensions");
-  if (existsSync(bundled)) {
-    for (const name of readdirSync(bundled).sort()) {
-      const entry = path.join(bundled, name, "index.js");
-      if (existsSync(entry)) entries.push(entry);
-    }
-  }
+  const entries: string[] = [...listedExtensionPackages()];
   for (const raw of (env.AFFINE_MCP_EXTENSIONS || "").split(";")) {
     const p = raw.trim();
-    if (p) entries.push(path.resolve(p));
+    if (p) entries.push(pathToFileURL(path.resolve(p)).href);
   }
   return [...new Set(entries)];
 }
@@ -100,7 +108,7 @@ export function loadExtensions(env: NodeJS.ProcessEnv = process.env): Promise<Af
     const seen = new Set<string>();
     for (const entry of extensionEntryPoints(env)) {
       try {
-        const mod = await import(pathToFileURL(entry).href);
+        const mod = await import(entry);
         const ext = (mod.default ?? mod) as AffineMcpExtension;
         if (!ext || typeof ext.register !== "function" || typeof ext.name !== "string") {
           console.error(`[affine-mcp] Extension ${entry} has no { name, register } default export; skipped.`);
