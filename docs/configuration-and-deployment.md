@@ -133,8 +133,10 @@ These controls are environment-only and are not read from the saved config file.
 
 An extension is an npm package whose default export is `{ name, version, register(ctx), cli? }`
 (`src/extensions.ts`). Every package named in package.json `affineMcpExtensions` is imported at startup.
-Each one is also a dependency pinned to an exact version and listed in `bundleDependencies`, so the
-packed tgz contains it and its sha256 covers the extension code too:
+Each one is also a regular dependency pinned to an exact version, so installing the tgz fetches that
+exact, immutable npm version. Do not add extensions to `bundleDependencies`: npm then marks their peer
+dependency `yjs` (and its dependencies) as bundled without packing them, and a fresh install gets empty
+`yjs`, `lib0` and `isomorphic.js` folders.
 
 - `@nineday/storyforge-cloud`: StoryForge's `sf_*` tools and the `affine-mcp sf …` CLI, built from
   `cloud/` in the StoryForge repo. To take a new version, bump the exact version here and run `npm install`.

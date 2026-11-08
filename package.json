@@ -130,9 +130,6 @@
   "affineMcpExtensions": [
     "@nineday/storyforge-cloud"
   ],
-  "bundleDependencies": [
-    "@nineday/storyforge-cloud"
-  ],
   "dependencies": {
     "@nineday/storyforge-cloud": "1.1.0",
     "@modelcontextprotocol/sdk": "^1.30.0",

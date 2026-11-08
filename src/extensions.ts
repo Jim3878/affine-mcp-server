@@ -6,7 +6,8 @@
 // Where extensions come from:
 //   - every package named in this package's package.json "affineMcpExtensions" list, imported from
 //     node_modules like any dependency (each one is also listed in "dependencies" with an exact version,
-//     so the tgz for partners pulls it in and package-lock.json records which build it is);
+//     so installing the tgz fetches that exact npm version; not in bundleDependencies, see
+//     docs/configuration-and-deployment.md);
 //   - extra module paths in AFFINE_MCP_EXTENSIONS (separated by ";"), for developing an extension.
 // AFFINE_MCP_EXTENSIONS_DISABLE=1 turns all of them off; AFFINE_DISABLED_EXTENSION_TOOLS (comma list)
 // turns off single extension tools.
