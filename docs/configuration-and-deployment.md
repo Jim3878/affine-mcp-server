@@ -128,6 +128,8 @@ These controls are environment-only and are not read from the saved config file.
 | `AFFINE_MCP_EXTENSIONS` | NineDay: extra extension module paths to load, separated by `;` (the packages listed in package.json `affineMcpExtensions`, such as `@nineday/storyforge-cloud`, always load) |
 | `AFFINE_MCP_EXTENSIONS_DISABLE` | NineDay: set to `1` to load no extensions at all |
 | `AFFINE_DISABLED_EXTENSION_TOOLS` | NineDay: comma-separated extension tool names to disable (for example `sf_write_playscript`) |
+| `AFFINE_SCREENSHOT_BROWSER_CHANNEL` | NineDay: browser channels `render_doc_screenshot` tries in order, comma-separated (default `msedge,chrome`); a Chromium installed by `playwright install` is tried last |
+| `AFFINE_SCREENSHOT_BROWSER_PATH` | NineDay: path to a Chromium-based browser executable for `render_doc_screenshot`; when set, the channels are not tried |
 
 ### Extensions (NineDay)
 

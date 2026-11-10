@@ -78,6 +78,7 @@
     "remove_doc_from_collection",
     "remove_tag_from_doc",
     "rename_folder",
+    "render_doc_screenshot",
     "reparent_mindmap_node",
     "replace_doc_with_markdown",
     "resolve_comment",

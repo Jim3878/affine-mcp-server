@@ -17,6 +17,7 @@ import { registerAuthTools } from "./tools/auth.js";
 import { registerOrganizeTools } from "./tools/organize.js";
 import { registerPropertyTools } from "./tools/properties.js";
 import { registerIconTools } from "./tools/icons.js";
+import { registerScreenshotTools } from "./tools/screenshot.js";
 import { runCli } from "./cli.js";
 import { createExtensionHost, extensionToolAllowed, loadExtensions } from "./extensions.js";
 import { startHttpMcpServer } from "./sse.js";
@@ -224,6 +225,7 @@ async function buildServer() {
   registerOrganizeTools(server, gql, { workspaceId: config.defaultWorkspaceId });
   registerPropertyTools(server, gql, { workspaceId: config.defaultWorkspaceId });
   registerIconTools(server, gql, { workspaceId: config.defaultWorkspaceId });
+  registerScreenshotTools(server, gql, { workspaceId: config.defaultWorkspaceId });
   registerUserTools(server, gql);
   registerUserCRUDTools(server, gql);
   if (config.authMode !== "oauth") {
