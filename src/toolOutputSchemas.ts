@@ -136,6 +136,7 @@ const OUTPUT_SPECS = {
   remove_doc_from_collection: spec({ id: "string", name: "string", rules: "object", allowList: "stringArray" }),
   remove_tag_from_doc: spec({ workspaceId: "string", docId: "string", tag: "string", removed: "boolean", tags: "stringArray", docMetaSynced: "boolean", warning: "nullableString" }),
   rename_folder: spec({ id: "string", name: "string" }),
+  reorder_database_columns: spec({ reordered: "boolean", views: "unknownArray" }),
   render_doc_screenshot: fallible(spec({ kind: "string", ok: "boolean", workspaceId: "string", docId: "string", mode: "string", mimeType: "string", bytes: "number", bounds: "object", zoom: "number", clipped: "boolean", missing: "stringArray", blockFound: "nullableBoolean", scrollY: "number", scrollHeight: "number", viewHeight: "number" }, true, ["kind", "ok", "docId", "mode"])),
   replace_doc_with_markdown: receipt({ workspaceId: "string", docId: "string", replaced: "boolean", warnings: "stringArray", lossy: "boolean", stats: "object" }),
   resolve_comment: fallible(receipt({ commentId: "string", id: "string", resolved: "boolean", success: "boolean" })),

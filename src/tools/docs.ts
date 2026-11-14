@@ -10225,6 +10225,127 @@ export function registerDocTools(
     deleteDatabaseColumnHandler as any
   );
 
+  // REORDER DATABASE COLUMNS (NineDay)
+  const reorderDatabaseColumnsHandler = async (parsed: {
+    workspaceId?: string;
+    docId: string;
+    databaseBlockId: string;
+    columns: string[];
+    view?: string;
+  }) => {
+    const workspaceId = parsed.workspaceId || defaults.workspaceId;
+    if (!workspaceId) throw new Error("workspaceId is required");
+    const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+    try {
+      // Without a "title" column definition, the editor's built-in title column has the id "title".
+      const builtInTitle = !ctx.columnDefs.some(col => col.type === "title");
+      const nameOf = (id: string) => ctx.colById.get(id)?.name || id;
+
+      const wanted: string[] = [];
+      for (const key of parsed.columns) {
+        const id = builtInTitle && key.trim().toLowerCase() === "title" && !findDatabaseColumn(key, ctx)
+          ? "title"
+          : requireColumn(ctx, key).id;
+        if (wanted.includes(id)) throw new Error(`Column '${key}' is listed more than once`);
+        wanted.push(id);
+      }
+
+      const viewMaps: Y.Map<any>[] = [];
+      forEachViewMap(ctx.dbBlock, view => viewMaps.push(view));
+      if (!viewMaps.length) throw new Error("Database has no views");
+      let targets = viewMaps;
+      if (parsed.view !== undefined) {
+        const key = parsed.view.trim().toLowerCase();
+        targets = viewMaps.filter(view => view.get("id") === parsed.view);
+        if (!targets.length) {
+          targets = viewMaps.filter(view => String(view.get("name") ?? "").trim().toLowerCase() === key);
+        }
+        if (!targets.length) {
+          const available = viewMaps.map(view => `${view.get("name") ?? ""} (${view.get("id")})`).join(", ");
+          throw new Error(`View '${parsed.view}' not found. Available views: ${available}`);
+        }
+      }
+
+      const results: Array<{
+        id: string;
+        name: string;
+        changed: boolean;
+        before: string[];
+        after: string[];
+        beforeIds: string[];
+        afterIds: string[];
+      }> = [];
+      for (const view of targets) {
+        // A view lists only some columns; AFFiNE shows unlisted ones after the listed ones.
+        // Write the whole order out so the result does not depend on that.
+        const entries = new Map<string, Record<string, unknown>>();
+        for (const entry of databaseArrayValues(view.get("columns"))) {
+          const id = databaseRecordValue(entry, "id");
+          if (typeof id !== "string" || entries.has(id)) continue;
+          if (id !== "title" && !ctx.colById.has(id)) continue;
+          entries.set(id, entry instanceof Y.Map ? entry.toJSON() : { ...(entry as Record<string, unknown>) });
+        }
+        if (builtInTitle && !entries.has("title")) {
+          const rest = [...entries];
+          entries.clear();
+          entries.set("title", { id: "title", hide: false, width: 200 });
+          rest.forEach(([id, entry]) => entries.set(id, entry));
+        }
+        for (const col of ctx.columnDefs) {
+          if (entries.has(col.id)) continue;
+          const width = col.raw instanceof Y.Map ? Number(col.raw.get("width")) : NaN;
+          entries.set(col.id, { id: col.id, hide: false, width: Number.isFinite(width) && width > 0 ? width : 200 });
+        }
+
+        const beforeIds = [...entries.keys()];
+        const afterIds = [...wanted, ...beforeIds.filter(id => !wanted.includes(id))];
+        const storedIds = databaseArrayValues(view.get("columns")).map(entry => databaseRecordValue(entry, "id"));
+        const changed = JSON.stringify(storedIds) !== JSON.stringify(afterIds);
+        if (changed) {
+          const ordered = afterIds.map(id => entries.get(id)!);
+          const viewColumns = view.get("columns");
+          if (viewColumns instanceof Y.Array) {
+            // Y types cannot be moved inside an array, so the entries are written again.
+            viewColumns.delete(0, viewColumns.length);
+            viewColumns.push(ordered.map(toYValue));
+          } else {
+            view.set("columns", toYValue(ordered));
+          }
+        }
+        results.push({
+          id: String(view.get("id") ?? ""),
+          name: String(view.get("name") ?? ""),
+          changed,
+          before: beforeIds.map(nameOf),
+          after: afterIds.map(nameOf),
+          beforeIds,
+          afterIds,
+        });
+      }
+
+      const reordered = results.some(view => view.changed);
+      if (reordered) await pushDatabaseChanges(workspaceId, parsed.docId, ctx);
+      return text({ reordered, views: results });
+    } finally {
+      ctx.socket.disconnect();
+    }
+  };
+  server.registerTool(
+    "reorder_database_columns",
+    {
+      title: "Reorder Database Columns",
+      description: "Change the column order of an AFFiNE database block's views. The listed columns move to the front in the given order; columns that are not listed follow in their current order. Widths and hidden flags are kept. Applies to every view unless `view` is given. The result lists each view's order before and after (names and IDs); pass `beforeIds` back to undo.",
+      inputSchema: {
+        workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+        docId: DocId.describe("Document ID containing the database"),
+        databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+        columns: z.array(z.string().min(1)).min(1).describe("Column names or IDs in the wanted order, first column first"),
+        view: z.string().min(1).optional().describe("View name or ID. Omit to reorder every view"),
+      },
+    },
+    reorderDatabaseColumnsHandler as any
+  );
+
   type SurfaceElementType = "shape" | "connector" | "text" | "group";
 
   type SurfaceElementFields = {

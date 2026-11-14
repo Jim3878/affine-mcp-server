@@ -254,6 +254,7 @@ Custom properties use AFFiNE's workspace-scoped tables. To recover values writte
 | `add_database_column` | Add a column to a database block | Supports `title`, `rich-text`, `select`, `multi-select`, `number`, `checkbox`, `link`, `date`, `relation` (`relationTarget`, `twoWay`) and `formula` (`expression`, `resultType`); rejects a title addition when the current snapshot already contains one |
 | `update_database_column` | Rename, resize, or change the type of a column | Converts cells where possible and reports cleared ones; also sets a relation's target or two-way mirror and a formula's expression |
 | `update_select_options` | Add, rename, recolor, or remove select / multi-select options | Removed options are also removed from cells |
+| `reorder_database_columns` | NineDay: change the column order of a database's views | Listed columns move to the front in the given order, the rest keep their order; every view unless `view` is given; returns each view's order before and after |
 | `delete_database_column` | Delete a column with its cells and view entries | Deletes a two-way relation's mirror column too; marked destructive but kept in the `authoring` profile |
 | `add_database_row` | Add a row to a database block | Rich-text and title values accept strings or delta arrays |
 | `delete_database_row` | Delete a row by row block id | Destructive |

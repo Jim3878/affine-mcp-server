@@ -186,6 +186,46 @@ async function main() {
     });
     expectEqual(cells?.rows?.length, 0, 'read_database_cells empty row count');
 
+    // NineDay: reorder_database_columns moves the listed columns to the front.
+    const statusId = expectedColumnIds.get('Status');
+    const estimateId = expectedColumnIds.get('Estimate');
+    const nameId = expectedColumnIds.get('Name');
+    const reorder = await call('reorder_database_columns', {
+      workspaceId,
+      docId,
+      databaseBlockId,
+      columns: ['Estimate', statusId],
+    });
+    expectEqual(reorder?.reordered, true, 'reorder reordered');
+    const reorderedView = reorder.views.find(view => view.id === tableView.id);
+    expectTruthy(reorderedView, 'reorder result lists the table view');
+    expectEqual(reorderedView.afterIds[0], estimateId, 'reorder first column');
+    expectEqual(reorderedView.afterIds[1], statusId, 'reorder second column');
+    expectEqual(reorderedView.afterIds.length, reorderedView.beforeIds.length, 'reorder keeps every column');
+    await settle();
+
+    const afterReorder = await call('read_database_columns', { workspaceId, docId, databaseBlockId });
+    const reorderedIds = afterReorder.views.find(view => view.id === tableView.id).columnIds;
+    expectEqual(JSON.stringify(reorderedIds), JSON.stringify(reorderedView.afterIds), 'stored view order');
+    expectTruthy(reorderedIds.indexOf(nameId) > 1, 'unlisted column follows the listed ones');
+
+    const again = await call('reorder_database_columns', {
+      workspaceId,
+      docId,
+      databaseBlockId,
+      columns: ['Estimate', 'Status'],
+    });
+    expectEqual(again?.reordered, false, 'reorder with the same order changes nothing');
+
+    for (const columns of [['Nope'], ['Status', statusId]]) {
+      const bad = await client.callTool(
+        { name: 'reorder_database_columns', arguments: { workspaceId, docId, databaseBlockId, columns } },
+        undefined,
+        { timeout: TOOL_TIMEOUT_MS },
+      );
+      expectTruthy(bad?.isError || parseContent(bad)?.error, `reorder rejects ${JSON.stringify(columns)}`);
+    }
+
     console.log();
     console.log('=== Database schema integration test passed ===');
   } finally {
