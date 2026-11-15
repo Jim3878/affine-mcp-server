@@ -14,6 +14,8 @@ import { ToolFailure, toolError } from "../util/mcp.js";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const NAVIGATION_TIMEOUT_MS = 45_000;
+// How long embed cards get to load the docs they show.
+const EMBED_LOAD_TIMEOUT_MS = 15_000;
 const MAX_PNG_BYTES = 6 * 1024 * 1024;
 
 /** Chrome AFFiNE draws over the canvas; hidden so the screenshot shows only the document. */
@@ -184,6 +186,50 @@ function scrollPageMode(args: { blockId: string | null; scrollY: number | null }
   };
 }
 
+/**
+ * Runs in the page: asks AFFiNE to sync the docs behind embed cards first, and counts the cards
+ * that still show "Loading...". A fresh browser has no local copy of the workspace, and the web
+ * app syncs every doc in the background; in a workspace with hundreds of docs the embedded ones
+ * can wait minutes for their turn unless they get a priority.
+ */
+function prioritizeEmbeddedDocs() {
+  const cards = [...document.querySelectorAll(
+    "affine-embed-edgeless-synced-doc-block, affine-embed-synced-doc-block, " +
+    "affine-embed-edgeless-linked-doc-block, affine-embed-linked-doc-block",
+  )] as any[];
+  const loading = cards.filter(card => card.blockState?.isLoading ?? card._loading);
+  const engine = (window as any).currentWorkspace?.engine?.doc;
+  const seen: Set<string> = ((window as any).__screenshotPrioritized ??= new Set<string>());
+  if (typeof engine?.addPriority === "function") {
+    for (const card of loading) {
+      const pageId = card.model?.props?.pageId;
+      if (typeof pageId !== "string" || seen.has(pageId)) continue;
+      seen.add(pageId);
+      try {
+        engine.addPriority(pageId, 100);
+      } catch {
+        // Best effort: the card then loads in the app's own order.
+      }
+    }
+  }
+  return { loading: loading.length };
+}
+
+/** Waits until no embed card is loading, or the time is up. Returns how many still are. */
+async function waitForEmbeddedDocs(page: any): Promise<number> {
+  const deadline = Date.now() + EMBED_LOAD_TIMEOUT_MS;
+  let idleChecks = 0;
+  let loading = 0;
+  while (Date.now() < deadline) {
+    loading = (await page.evaluate(prioritizeEmbeddedDocs)).loading;
+    // A loaded synced doc can hold more cards; look twice before calling it done.
+    idleChecks = loading === 0 ? idleChecks + 1 : 0;
+    if (idleChecks >= 2) break;
+    await page.waitForTimeout(loading === 0 ? 300 : 500);
+  }
+  return loading;
+}
+
 export async function renderDocScreenshot(request: ScreenshotRequest): Promise<ScreenshotResult> {
   const playwright = await loadPlaywright();
   const browser = await launchBrowser(playwright);
@@ -249,6 +295,8 @@ export async function renderDocScreenshot(request: ScreenshotRequest): Promise<S
       delete details.fitted;
     }
 
+    const loadingCards = await waitForEmbeddedDocs(page);
+
     // AFFiNE keeps a sync socket open, so the network rarely goes fully idle; this only gives images a moment.
     await page.waitForLoadState("networkidle", { timeout: 2_500 }).catch(() => undefined);
     await page.waitForTimeout(request.waitMs);
@@ -280,7 +328,8 @@ export async function renderDocScreenshot(request: ScreenshotRequest): Promise<S
       },
     });
     delete details.clip;
-    return { png, meta: details };
+    // Embed cards still showing "Loading..." in the capture.
+    return { png, meta: { ...details, loadingCards } };
   } finally {
     await browser.close().catch(() => undefined);
   }
@@ -385,7 +434,8 @@ export function registerScreenshotTools(server: McpServer, gql: GraphQLClient, d
         "Edgeless mode frames targetIds (frame/note/surface element ids) or a canvas region, or the whole canvas when " +
         "neither is given; a large canvas is unreadable in one image, so frame one diagram or note at a time. " +
         "Page mode shows one window of the page; use blockId or scrollY to move, and the returned scrollHeight/viewHeight " +
-        "to page through. Needs a browser on the server machine and a cookie session. Read-only; takes several seconds.",
+        "to page through. Embed cards get up to 15 seconds to load their docs; loadingCards in the result counts the ones " +
+        "still showing Loading (0 means the capture is complete). Needs a browser on the server machine and a cookie session. Read-only; takes several seconds.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: z.string().min(1).describe("Document ID"),
