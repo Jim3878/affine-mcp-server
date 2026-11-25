@@ -1270,10 +1270,11 @@ async function listWorkspaceDocsForCollectionRules(
       const { docId, doc } = await loadFoldersDoc(socket, resolvedWorkspaceId);
       const nodeMap = organizeNodeMap(readOrganizeNodes(doc));
       ensureNodeIsFolder(nodeMap, folderId);
+      const previousName = nodeMap.get(folderId)?.data ?? "";
       const record = ensureRecord(doc, folderId);
       record.set("data", name);
       await saveFoldersDoc(socket, resolvedWorkspaceId, docId, doc);
-      return text({ id: folderId, name });
+      return text({ id: folderId, name, previousName });
     } finally {
       socket.disconnect();
     }
@@ -1283,7 +1284,7 @@ async function listWorkspaceDocsForCollectionRules(
     "rename_folder",
     {
       title: "Rename Folder",
-      description: "Experimental: rename an AFFiNE organize folder node. This changes sidebar metadata only and does not rename documents inside the folder.",
+      description: "Experimental: rename an AFFiNE organize folder node. This changes sidebar metadata only and does not rename documents inside the folder. Returns previousName so the rename can be undone.",
       inputSchema: {
         workspaceId: WorkspaceId.optional(),
         folderId: FolderId,
@@ -1382,7 +1383,13 @@ async function listWorkspaceDocsForCollectionRules(
       record.set("parentId", resolvedParentId);
       record.set("index", nextIndex);
       await saveFoldersDoc(socket, resolvedWorkspaceId, docId, doc);
-      return text({ id: nodeId, parentId: resolvedParentId, index: nextIndex });
+      return text({
+        id: nodeId,
+        parentId: resolvedParentId,
+        index: nextIndex,
+        previousParentId: node.parentId,
+        previousIndex: node.index,
+      });
     } finally {
       socket.disconnect();
     }
@@ -1392,7 +1399,7 @@ async function listWorkspaceDocsForCollectionRules(
     "move_organize_node",
     {
       title: "Move Organize Node",
-      description: "Experimental: move an AFFiNE organize folder or link node to another folder or root. This preserves the target document, tag, or collection and changes only sidebar placement.",
+      description: "Experimental: move an AFFiNE organize folder or link node to another folder or root. This preserves the target document, tag, or collection and changes only sidebar placement. Returns previousParentId and previousIndex so the move can be undone.",
       inputSchema: {
         workspaceId: WorkspaceId.optional(),
         nodeId: OrganizeNodeId,
