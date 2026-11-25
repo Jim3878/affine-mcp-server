@@ -6,6 +6,7 @@ import { GraphQLClient } from "../graphqlClient.js";
 import { text, ToolFailure } from "../util/mcp.js";
 import { secureRandomString } from "../util/random.js";
 import { docPropertiesDocId } from "../util/docCreator.js";
+import { fetchAllWorkspaceMembers, resolveMemberReferences, type WorkspaceMember } from "./members.js";
 import {
   wsUrlFromGraphQLEndpoint,
   connectWorkspaceSocket,
@@ -34,6 +35,7 @@ import {
  *  - number:   stringified number
  *  - checkbox: "true" | "false"
  *  - date:     "YYYY-MM-DD"
+ *  - member:   comma separated workspace user ids (NineDay frontend fork property type)
  *
  * References (AFFiNE repo):
  *  - modules/db/services/db.ts -> normalized guid `db$${tableName}`
@@ -49,7 +51,7 @@ function customPropertyInfoDocId(workspaceId: string): string {
 const DELETED_FLAG = "$$DELETED";
 const CUSTOM_PREFIX = "custom:";
 
-const SUPPORTED_TYPES = ["text", "number", "checkbox", "date"] as const;
+const SUPPORTED_TYPES = ["text", "number", "checkbox", "date", "member"] as const;
 type SupportedType = (typeof SUPPORTED_TYPES)[number];
 
 const CHECKBOX_TRUE: unknown[] = [true, 1, "true", "1", "yes"];
@@ -134,9 +136,21 @@ function nextIndex(defs: PropertyDefinition[]): string {
   return generateKeyBetween(last, null);
 }
 
+/** Split a member property value (stored string, comma separated input, or array) into trimmed references. */
+function memberReferences(value: unknown): string[] {
+  const parts = Array.isArray(value) ? value.map(String) : String(value ?? "").split(",");
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
 /** Encode a JS value into AFFiNE's per-type string representation; throws on invalid input. */
 function encodeValue(type: SupportedType, value: unknown): string {
+  if (Array.isArray(value) && type !== "member") {
+    throw new Error(`${type} property requires a single value; arrays are only accepted by member properties`);
+  }
   switch (type) {
+    case "member":
+      // Callers resolve names/emails to user ids first; this only normalizes the list.
+      return [...new Set(memberReferences(value))].join(",");
     case "checkbox": {
       const normalized = typeof value === "string" ? value.trim().toLowerCase() : value;
       if (CHECKBOX_TRUE.includes(normalized)) return "true";
@@ -177,13 +191,23 @@ function decodeValue(type: string, raw: unknown): unknown {
       const n = Number(raw);
       return Number.isFinite(n) ? n : raw;
     }
+    case "member":
+      return memberReferences(raw);
     default:
       return raw;
   }
 }
 
+/** Attach display names to stored member ids; ids no longer in the workspace keep a null name. */
+function describeMembers(ids: string[], members?: Map<string, WorkspaceMember>) {
+  return ids.map((id) => {
+    const member = members?.get(id);
+    return { id, name: member?.name ?? null, email: member?.email ?? null, inWorkspace: members ? !!member : null };
+  });
+}
+
 /** Decode one storage namespace without mixing native and legacy records. */
-function propertyListing(infoDoc: Y.Doc, propsDoc: Y.Doc, docId: string) {
+function propertyListing(infoDoc: Y.Doc, propsDoc: Y.Doc, docId: string, members?: Map<string, WorkspaceMember>) {
   const defs = readPropertyDefinitions(infoDoc);
   const record = propsDoc.share.has(docId)
     ? (propsDoc.getMap(docId).toJSON() as Record<string, unknown>)
@@ -198,6 +222,7 @@ function propertyListing(infoDoc: Y.Doc, propsDoc: Y.Doc, docId: string) {
       type: def.type,
       value: decodeValue(def.type, raw),
       set: raw !== undefined && raw !== null,
+      ...(def.type === "member" ? { members: describeMembers(memberReferences(raw), members) } : {}),
     };
   });
 
@@ -399,7 +424,16 @@ export function registerPropertyTools(
 
       const { doc: infoDoc } = await loadSubdoc(socket, workspaceId, customPropertyInfoDocId(workspaceId));
       const { doc: propsDoc } = await loadSubdoc(socket, workspaceId, docPropertiesDocId(workspaceId));
-      const native = propertyListing(infoDoc, propsDoc, parsed.docId);
+      // Member names are only looked up when a member-typed property exists.
+      let members: Map<string, WorkspaceMember> | undefined;
+      if (readPropertyDefinitions(infoDoc).some((def) => def.type === "member")) {
+        try {
+          members = new Map((await fetchAllWorkspaceMembers(gql, workspaceId)).map((m) => [m.id, m]));
+        } catch {
+          members = undefined; // ids are still returned; names stay null
+        }
+      }
+      const native = propertyListing(infoDoc, propsDoc, parsed.docId, members);
       let legacy;
       if (parsed.includeLegacy) {
         const { doc: legacyInfo } = await loadSubdoc(socket, workspaceId, "db$docCustomPropertyInfo");
@@ -481,7 +515,7 @@ export function registerPropertyTools(
     {
       title: "Create Custom Property",
       description:
-        "Create a workspace-wide custom property definition (text, number, checkbox, or date). Returns its propertyId.",
+        "Create a workspace-wide custom property definition (text, number, checkbox, date, or member). Returns its propertyId. The member type holds assigned workspace members and needs the NineDay AFFiNE frontend to render; stock AFFiNE clients show it as an unknown property.",
       inputSchema: {
         workspaceId: WorkspaceId.optional(),
         name: z.string().min(1).describe("Display name of the property"),
@@ -544,7 +578,7 @@ export function registerPropertyTools(
     workspaceId?: string;
     docId: string;
     property: string;
-    value: string | number | boolean;
+    value: string | number | boolean | string[];
   }) => {
     const workspaceId = requireWorkspaceId(parsed.workspaceId);
     const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
@@ -566,7 +600,15 @@ export function registerPropertyTools(
           `Property "${def.name || def.id}" has type "${def.type}", which set_doc_property cannot edit. Supported: ${SUPPORTED_TYPES.join(", ")}.`
         );
       }
-      const encoded = encodeValue(def.type as SupportedType, parsed.value);
+      let assigned: WorkspaceMember[] | undefined;
+      let value: unknown = parsed.value;
+      if (def.type === "member") {
+        // Resolve ids / emails / names against the live member list so a typo cannot be stored.
+        const members = await fetchAllWorkspaceMembers(gql, workspaceId);
+        assigned = resolveMemberReferences(members, memberReferences(parsed.value));
+        value = assigned.map((member) => member.id);
+      }
+      const encoded = encodeValue(def.type as SupportedType, value);
 
       const { doc, prevSV } = await loadSubdoc(socket, workspaceId, docPropertiesDocId(workspaceId));
       const record = doc.getMap(parsed.docId);
@@ -584,6 +626,7 @@ export function registerPropertyTools(
         value: decodeValue(def.type, encoded),
         stored: encoded,
         updated: true,
+        ...(assigned ? { members: assigned.map((m) => ({ id: m.id, name: m.name, email: m.email })) } : {}),
       });
     } finally {
       socket.disconnect();
@@ -594,14 +637,14 @@ export function registerPropertyTools(
     {
       title: "Set Document Property",
       description:
-        "Set a document's custom property value (property by id or name). Value is validated against the property type (text/number/checkbox/date).",
+        "Set a document's custom property value (property by id or name). Value is validated against the property type (text/number/checkbox/date/member). For a member property pass an array (or comma separated string) of user ids, emails, or unique display names from list_workspace_members; it replaces the whole assignment, and an empty array clears it. This only stores the assignment: AFFiNE sends no notification.",
       inputSchema: {
         workspaceId: WorkspaceId.optional(),
         docId: DocId,
         property: z.string().min(1).describe("Property id or name"),
         value: z
-          .union([z.string(), z.number(), z.boolean()])
-          .describe("Value; coerced per property type (checkbox->bool, number, date YYYY-MM-DD, text)"),
+          .union([z.string(), z.number(), z.boolean(), z.array(z.string()).max(100)])
+          .describe("Value; coerced per property type (checkbox->bool, number, date YYYY-MM-DD, text, member -> array of user ids/emails/names)"),
       },
     },
     setDocPropertyHandler as any
