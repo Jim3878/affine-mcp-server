@@ -318,11 +318,17 @@ const AUTHORING_EXCLUDED_GROUPS = new Set([
   "experimental",
 ]);
 
-// NineDay: read-only experimental tools the authoring profile still exposes, so agents can
-// see which sidebar folder a doc lives in. Folder writes stay excluded.
+// NineDay: experimental sidebar-folder tools the authoring profile still exposes, so agents
+// can see which folder a doc lives in, create folders and subfolders, file docs into them,
+// and move or rename what is there (both can be undone from the returned previous values).
+// Deleting folders or links stays excluded.
 const AUTHORING_EXPERIMENTAL_ALLOWED = new Set<ToolName>([
+  "add_organize_link",
+  "create_folder",
   "get_folder_icon",
   "list_organize_nodes",
+  "move_organize_node",
+  "rename_folder",
 ]);
 
 // NineDay: deletes data but stays out of the "destructive" group, so the authoring profile

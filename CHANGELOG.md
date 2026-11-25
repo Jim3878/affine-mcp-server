@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- NineDay: the `authoring` profile now exposes `create_folder`, `add_organize_link`, `move_organize_node`, and `rename_folder`, so agents can create sidebar folders and subfolders and file docs into them. `delete_folder`, `delete_organize_link`, `create_workspace_blueprint`, and `update_folder_icon` stay excluded.
+- `rename_folder` returns `previousName`; `move_organize_node` returns `previousParentId` and `previousIndex`, so either change can be undone.
+
 ## [3.10.1] - 2026-10-22
 
 ### Fixed

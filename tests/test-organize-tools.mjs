@@ -402,6 +402,7 @@ async function main() {
       parentId: childFolderId,
     });
     expectEqual(movedLink?.parentId, childFolderId, 'move_organize_node parentId');
+    expectEqual(movedLink?.previousParentId, rootFolderId, 'move_organize_node previousParentId');
 
     const deletedLink = await call('delete_organize_link', {
       workspaceId,

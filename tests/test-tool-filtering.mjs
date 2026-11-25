@@ -385,12 +385,13 @@ async function run() {
       "delete_surface_element",
       "cleanup_blobs",
       "update_profile",
-      "create_folder",
-      "move_organize_node",
       "delete_folder",
+      "delete_organize_link",
+      "create_workspace_blueprint",
+      "update_folder_icon",
     ];
     const visibleRestricted = hiddenAuthoring.filter(t => tools8.includes(t));
-    const expectedAuthoring = ["create_semantic_page", "instantiate_template_native", "add_surface_element", "move_block", "trash_doc", "restore_doc", "update_block", "update_table_cell", "update_surface_element", "list_organize_nodes", "get_folder_icon"];
+    const expectedAuthoring = ["create_semantic_page", "instantiate_template_native", "add_surface_element", "move_block", "trash_doc", "restore_doc", "update_block", "update_table_cell", "update_surface_element", "list_organize_nodes", "get_folder_icon", "create_folder", "add_organize_link", "move_organize_node", "rename_folder"];
     const missingAuthoring = expectedAuthoring.filter(t => !tools8.includes(t));
     if (visibleRestricted.length === 0 && missingAuthoring.length === 0) {
       console.log("✅ Success: Authoring profile keeps editing tools while hiding restricted tools.");
