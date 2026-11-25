@@ -2,6 +2,7 @@
   "version": 1,
   "classifications": {
     "test-auth-session.mjs": "fast",
+    "test-blob-copy-contract.mjs": "fast",
     "test-blob-upload-contract.mjs": "fast",
     "test-block-editing.mjs": "integration",
     "test-canvas-tool-map-demo.mjs": "integration",
@@ -85,6 +86,7 @@
   "suites": {
     "fast": [
       "test-auth-session.mjs",
+      "test-blob-copy-contract.mjs",
       "test-blob-upload-contract.mjs",
       "test-cli-commands.mjs",
       "test-cli-onboarding.mjs",

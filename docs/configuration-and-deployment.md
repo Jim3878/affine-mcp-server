@@ -97,8 +97,11 @@ These controls are environment-only and are not read from the saved config file.
 | `AFFINE_BLOB_UPLOAD_MAX_BYTES` | No | `26214400` (25 MiB) | Maximum decoded payload size accepted by `upload_blob` |
 | `AFFINE_BLOB_UPLOAD_TIMEOUT_MS` | No | `30000` | Maximum time allowed for the multipart upload request |
 | `AFFINE_BLOB_UPLOAD_RESPONSE_MAX_BYTES` | No | `1048576` (1 MiB) | Maximum AFFiNE response body size read after an upload |
+| `AFFINE_BLOB_DOWNLOAD_DIR` | No | `affine-mcp-blobs` in the OS temp directory | Folder where `download_blob` saves files when no `outputPath` is given |
 
 `upload_blob` treats content as UTF-8 by default and preserves it exactly, including leading and trailing whitespace. Binary callers must pass `encoding: "base64"`; Base64 input is validated for canonical padding before it is decoded. ASCII whitespace inside explicit Base64 input is ignored.
+
+`download_blob` and `copy_blob` reuse `AFFINE_BLOB_UPLOAD_MAX_BYTES` as the largest blob they will transfer and `AFFINE_BLOB_UPLOAD_TIMEOUT_MS` as the timeout for each download and each upload.
 
 ### Upstream response safeguards
 

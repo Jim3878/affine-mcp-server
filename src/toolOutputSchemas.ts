@@ -165,6 +165,8 @@ const OUTPUT_SPECS = {
   update_table_cell: spec({ updated: "boolean", blockId: "string", row: "number", column: "number", rowId: "string", columnId: "string", previous: "object", cell: "object" }),
   update_table_column_widths: spec({ updated: "boolean", blockId: "string", rowCount: "number", columnCount: "number", columnIds: "stringArray", changedColumns: "unknownArray", previous: "object", table: "object" }),
   update_workspace: fallible(spec({ kind: "string", ok: "boolean", workspaceId: "string", id: "string", error: "string" }, true, ["kind", "ok"])),
+  copy_blob: fallible(spec({ kind: "string", ok: "boolean", status: "string", sourceWorkspaceId: "string", targetWorkspaceId: "string", copied: "number", failed: "number", results: "unknownArray" }, true, ["kind", "ok"])),
+  download_blob: fallible(spec({ kind: "string", ok: "boolean", workspaceId: "string", key: "string", path: "string", size: "number", contentType: "string", inlineImage: "boolean" }, true, ["kind", "ok"])),
   upload_blob: fallible(spec({ id: "string", key: "string", workspaceId: "string", filename: "string", contentType: "string", encoding: "string", size: "number", uploadedAt: "string", error: "string" }, true, ["id", "key"])),
 } satisfies Record<ToolName, OutputSpec>;
 
