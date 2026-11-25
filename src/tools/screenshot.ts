@@ -17,6 +17,10 @@ const NAVIGATION_TIMEOUT_MS = 45_000;
 // How long embed cards get to load the docs they show.
 const EMBED_LOAD_TIMEOUT_MS = 15_000;
 const MAX_PNG_BYTES = 6 * 1024 * 1024;
+// How far a capture may zoom out to fit what it frames. AFFiNE's own floor is 0.1.
+const MIN_CAPTURE_ZOOM = 0.02;
+// Below this zoom the result carries a hint that the image is an overview.
+const READABLE_ZOOM = 0.1;
 
 /** Chrome AFFiNE draws over the canvas; hidden so the screenshot shows only the document. */
 const HIDE_CHROME_CSS = [
@@ -97,7 +101,7 @@ function cookiesFor(baseUrl: string, cookieHeader: string) {
 }
 
 /** Runs in the page: points the edgeless viewport at the requested bound and reports what it used. */
-function frameEdgelessViewport(args: { targetIds: string[]; region: Region | null; padding: number }) {
+function frameEdgelessViewport(args: { targetIds: string[]; region: Region | null; padding: number; minZoom: number }) {
   const root = document.querySelector("affine-edgeless-root") as any;
   const gfx = root?.gfx;
   const viewport = gfx?.viewport;
@@ -135,17 +139,67 @@ function frameEdgelessViewport(args: { targetIds: string[]; region: Region | nul
   const width = Math.max(1, maxX - minX);
   const height = Math.max(1, maxY - minY);
   const wanted = Math.min(viewport.width / width, viewport.height / height);
+  const editorMinZoom = viewport.ZOOM_MIN ?? 0.1;
+  if (wanted < editorMinZoom) {
+    // AFFiNE stops zooming out at 10%, which shows 16000 canvas units across the default width.
+    // A wider bound would be cut off around its centre, often leaving only empty canvas, so let
+    // this page zoom out further.
+    try {
+      viewport.ZOOM_MIN = Math.max(args.minZoom, wanted);
+    } catch {
+      // A build without the override stays at its own minimum and reports clipped.
+    }
+  }
   const zoom = Math.min(viewport.ZOOM_MAX ?? 6, Math.max(viewport.ZOOM_MIN ?? 0.1, wanted));
-  viewport.setViewport(zoom, [minX + width / 2, minY + height / 2]);
+  const center = [minX + width / 2, minY + height / 2];
+  // A zoom animation in flight keeps writing its own steps after setViewport; see holdEdgelessViewport.
+  if (viewport._rafId) cancelAnimationFrame(viewport._rafId);
+  viewport.setViewport(zoom, center);
+  (window as any).__screenshotViewport = { zoom: viewport.zoom, center };
   return {
     bounds: { x: minX, y: minY, width, height },
     zoom: viewport.zoom,
     // The requested bound did not fit at the minimum zoom, so the edges are cut off.
-    clipped: wanted < zoom,
+    clipped: wanted < viewport.zoom - 1e-9,
     missing,
     // Size of the bound on screen, so the capture can be cropped to it instead of showing neighbours.
     fitted: { width: width * viewport.zoom, height: height * viewport.zoom },
   };
+}
+
+/**
+ * Runs in the page: puts the edgeless viewport back where frameEdgelessViewport pointed it, if
+ * something moved it since. On a doc this browser has not opened before, whose primary mode is
+ * page, AFFiNE animates to the page note at 65% zoom; setViewport does not cancel that animation,
+ * so its remaining steps overwrite the framing.
+ */
+function holdEdgelessViewport() {
+  const viewport = (document.querySelector("affine-edgeless-root") as any)?.gfx?.viewport;
+  const wanted = (window as any).__screenshotViewport as { zoom: number; center: number[] } | undefined;
+  if (!viewport || !wanted) return { moved: false, zoom: null };
+  const near = (a: number, b: number) => Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a), Math.abs(b));
+  const seen = { zoom: viewport.zoom as number, centerX: viewport.centerX as number, centerY: viewport.centerY as number };
+  const moved = !near(seen.zoom, wanted.zoom) || !near(seen.centerX, wanted.center[0]) || !near(seen.centerY, wanted.center[1]);
+  if (moved) {
+    if (viewport._rafId) cancelAnimationFrame(viewport._rafId);
+    viewport.setViewport(wanted.zoom, wanted.center);
+  }
+  return { moved, zoom: viewport.zoom as number };
+}
+
+/** Keeps the framing until it stays put for two checks in a row. Returns the zoom on screen and whether it had to be restored. */
+async function settleEdgelessViewport(page: any): Promise<{ zoom: number | null; restored: boolean }> {
+  let stable = 0;
+  let restored = false;
+  let zoom: number | null = null;
+  for (let attempt = 0; attempt < 20 && stable < 2; attempt++) {
+    const state = await page.evaluate(holdEdgelessViewport);
+    zoom = state.zoom;
+    if (state.moved) restored = true;
+    stable = state.moved ? 0 : stable + 1;
+    if (stable < 2) await page.waitForTimeout(250);
+  }
+  return { zoom, restored };
 }
 
 /** Runs in the page: scrolls page mode to a block or an offset and reports the scroll state. */
@@ -270,6 +324,12 @@ export async function renderDocScreenshot(request: ScreenshotRequest): Promise<S
         width: Math.round(request.width + (request.width - rootRect.width)),
         height: Math.round(request.height + (request.height - rootRect.height)),
       });
+      // The editor learns its new size from a ResizeObserver. Framing before that arrives fits the
+      // bound to the old, narrower size, and the late resize then shifts the view.
+      await page.waitForFunction((size: { width: number; height: number }) => {
+        const viewport = (document.querySelector("affine-edgeless-root") as any)?.gfx?.viewport;
+        return !viewport || (Math.abs(viewport.width - size.width) <= 2 && Math.abs(viewport.height - size.height) <= 2);
+      }, { width: request.width, height: request.height }, { timeout: 3_000 }).catch(() => undefined);
       await page.waitForTimeout(400);
       rootRect = await measure();
     }
@@ -281,6 +341,7 @@ export async function renderDocScreenshot(request: ScreenshotRequest): Promise<S
         targetIds: request.targetIds ?? [],
         region: request.region ?? null,
         padding: request.padding,
+        minZoom: MIN_CAPTURE_ZOOM,
       });
     } else {
       details = await page.evaluate(scrollPageMode, { blockId: request.blockId ?? null, scrollY: request.scrollY ?? null });
@@ -300,7 +361,17 @@ export async function renderDocScreenshot(request: ScreenshotRequest): Promise<S
     // AFFiNE keeps a sync socket open, so the network rarely goes fully idle; this only gives images a moment.
     await page.waitForLoadState("networkidle", { timeout: 2_500 }).catch(() => undefined);
     await page.waitForTimeout(request.waitMs);
-    if (request.mode === "page" && (request.blockId || request.scrollY !== undefined)) {
+    if (request.mode === "edgeless") {
+      const settled = await settleEdgelessViewport(page);
+      if (settled.zoom !== null) details.zoom = settled.zoom;
+      // The canvas repaints a frame or two after the viewport is put back.
+      if (settled.restored) await page.waitForTimeout(500);
+      if (details.zoom < READABLE_ZOOM) {
+        details.hint = `The framed area is ${Math.round(details.bounds.width)}x${Math.round(details.bounds.height)} canvas units, shown at ${Math.round(details.zoom * 100)}%: ` +
+          "an overview only, text is not readable. Capture parts of it with region or targetIds for detail.";
+      }
+    }
+    if (request.mode === "page" &&(request.blockId || request.scrollY !== undefined)) {
       // Images and embeds above the target load lazily and change height, which moves the target
       // after the first scroll. Scroll again until it stays put.
       for (let attempt = 0; attempt < 6; attempt++) {
@@ -433,6 +504,8 @@ export function registerScreenshotTools(server: McpServer, gql: GraphQLClient, d
         "text overflowing a shape, connector label placement, real note heights, whether an image renders. " +
         "Edgeless mode frames targetIds (frame/note/surface element ids) or a canvas region, or the whole canvas when " +
         "neither is given; a large canvas is unreadable in one image, so frame one diagram or note at a time. " +
+        "The view zooms out as far as 2% to fit what it frames; below 10% the result carries a hint that the image is only an overview, " +
+        "and clipped is true when even 2% does not fit. " +
         "Page mode shows one window of the page; use blockId or scrollY to move, and the returned scrollHeight/viewHeight " +
         "to page through. Embed cards get up to 15 seconds to load their docs; loadingCards in the result counts the ones " +
         "still showing Loading (0 means the capture is complete). Needs a browser on the server machine and a cookie session. Read-only; takes several seconds.",
