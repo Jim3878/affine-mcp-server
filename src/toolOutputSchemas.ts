@@ -137,7 +137,7 @@ const OUTPUT_SPECS = {
   remove_tag_from_doc: spec({ workspaceId: "string", docId: "string", tag: "string", removed: "boolean", tags: "stringArray", docMetaSynced: "boolean", warning: "nullableString" }),
   rename_folder: spec({ id: "string", name: "string", previousName: "string" }),
   reorder_database_columns: spec({ reordered: "boolean", views: "unknownArray" }),
-  render_doc_screenshot: fallible(spec({ kind: "string", ok: "boolean", workspaceId: "string", docId: "string", mode: "string", mimeType: "string", bytes: "number", bounds: "object", zoom: "number", clipped: "boolean", missing: "stringArray", loadingCards: "number", blockFound: "nullableBoolean", scrollY: "number", scrollHeight: "number", viewHeight: "number" }, true, ["kind", "ok", "docId", "mode"])),
+  render_doc_screenshot: fallible(spec({ kind: "string", ok: "boolean", workspaceId: "string", docId: "string", mode: "string", mimeType: "string", bytes: "number", bounds: "object", zoom: "number", clipped: "boolean", hint: "string", missing: "stringArray", loadingCards: "number", blockFound: "nullableBoolean", scrollY: "number", scrollHeight: "number", viewHeight: "number" }, true, ["kind", "ok", "docId", "mode"])),
   replace_doc_with_markdown: receipt({ workspaceId: "string", docId: "string", replaced: "boolean", warnings: "stringArray", lossy: "boolean", stats: "object" }),
   resolve_comment: fallible(receipt({ commentId: "string", id: "string", resolved: "boolean", success: "boolean" })),
   restore_doc: fallible(receipt({ status: "string", workspaceId: "string", docId: "string", title: "nullableString", changed: "boolean", previouslyInTrash: "boolean", inTrash: "boolean", trashDate: "nullableNumber", readBackVerified: "boolean" })),
