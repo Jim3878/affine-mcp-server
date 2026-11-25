@@ -4,13 +4,11 @@
 // elements and database cells stay exactly as they were. Only the ids of *other docs* have to
 // change, and those are rewritten in place before the push.
 import * as Y from "yjs";
-import fetch from "node-fetch";
-import FormData from "form-data";
 import type { GraphQLClient } from "../graphqlClient.js";
+import { copyBlob } from "../tools/blobStorage.js";
 
 /** base64url(SHA-256) with optional padding: the shape of an AFFiNE blob key. */
 const BLOB_KEY_PATTERN = /^[A-Za-z0-9_-]{43}=?$/;
-const DEFAULT_BLOB_TIMEOUT_MS = 60_000;
 
 export type DocReferenceScan = {
   /** Doc ids this doc points to through embed cards, inline references or relation columns. */
@@ -201,29 +199,6 @@ export type BlobCopyOutcome =
   | { key: string; status: "not_found" }
   | { key: string; status: "failed"; error: string };
 
-function blobUrl(baseUrl: string, workspaceId: string, key: string): string {
-  return `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/blobs/${encodeURIComponent(key)}`;
-}
-
-function authHeaders(headers: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers).filter(([name]) => !["content-type", "content-length", "transfer-encoding", "accept"].includes(name.toLowerCase())),
-  );
-}
-
-async function withTimeout<T>(timeoutMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await run(controller.signal);
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error(`timed out after ${timeoutMs}ms`);
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
  * Keys of the blobs a workspace already stores, or null when the listing is unavailable.
  * Presence is read from this listing and never by requesting the blob URL: a CDN in front of
@@ -246,9 +221,8 @@ export async function listWorkspaceBlobKeys(gql: GraphQLClient, workspaceId: str
 
 /**
  * Copy one blob between workspaces: skip it when the target already stores that key, otherwise
- * download it from the source and upload it with setBlob. Never throws; the outcome says what
- * happened. setBlob stores a blob under the uploaded filename, so uploading with the key as the
- * filename keeps the key identical on both sides.
+ * hand it to copyBlob (the transfer behind the copy_blob tool). Never throws; the outcome says
+ * what happened. The key is sent as the upload filename, so it is the same on both sides.
  */
 export async function copyBlobBetweenWorkspaces(
   gql: GraphQLClient,
@@ -259,57 +233,19 @@ export async function copyBlobBetweenWorkspaces(
     maxBytes: number;
     /** Keys already in the target (from listWorkspaceBlobKeys); null uploads unconditionally. */
     targetKeys?: ReadonlySet<string> | null;
-    timeoutMs?: number;
   },
 ): Promise<BlobCopyOutcome> {
-  const { sourceWorkspaceId, targetWorkspaceId, key, maxBytes } = input;
-  const timeoutMs = input.timeoutMs ?? DEFAULT_BLOB_TIMEOUT_MS;
+  const { sourceWorkspaceId, targetWorkspaceId, key } = input;
+  if (input.targetKeys?.has(key)) return { key, status: "already_present" };
   try {
-    if (input.targetKeys?.has(key)) return { key, status: "already_present" };
-    const { endpoint, headers } = await gql.getConnectionAuth();
-    const baseUrl = gql.baseUrl;
-    const auth = authHeaders(headers);
-
-    const downloaded = await withTimeout(timeoutMs, async signal => {
-      const response = await fetch(blobUrl(baseUrl, sourceWorkspaceId, key), { headers: auth, signal: signal as any });
-      if (response.status === 404) return null;
-      if (!response.ok) throw new Error(`download failed with HTTP ${response.status}`);
-      const declared = Number(response.headers.get("content-length") ?? "0");
-      if (declared > maxBytes) throw new Error(`blob is ${declared} bytes; the limit is ${maxBytes} bytes`);
-      const data = Buffer.from(await response.arrayBuffer());
-      if (data.length > maxBytes) throw new Error(`blob is ${data.length} bytes; the limit is ${maxBytes} bytes`);
-      return { data, contentType: response.headers.get("content-type") || "application/octet-stream" };
-    });
-    if (!downloaded) return { key, status: "not_found" };
-
-    const uploadedKey = await withTimeout(timeoutMs, async signal => {
-      const form = new FormData();
-      form.append("operations", JSON.stringify({
-        query: "mutation SetBlob($workspaceId: String!, $blob: Upload!) { setBlob(workspaceId: $workspaceId, blob: $blob) }",
-        variables: { workspaceId: targetWorkspaceId, blob: null },
-      }));
-      form.append("map", JSON.stringify({ "0": ["variables.blob"] }));
-      form.append("0", downloaded.data, { filename: key, contentType: downloaded.contentType });
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { ...auth, ...form.getHeaders() },
-        body: form as any,
-        signal: signal as any,
-      });
-      const body = await response.text();
-      let parsed: any = null;
-      try { parsed = JSON.parse(body); } catch { /* reported below */ }
-      const message = parsed?.errors?.[0]?.message;
-      if (!response.ok || message) throw new Error(`upload failed${response.ok ? "" : ` with HTTP ${response.status}`}${message ? `: ${message}` : ""}`);
-      const result = parsed?.data?.setBlob;
-      if (typeof result !== "string" || !result) throw new Error("upload returned no blob key");
-      return result;
-    });
-    if (uploadedKey !== key) {
-      return { key, status: "failed", error: `target stored the blob under a different key (${uploadedKey})` };
+    const copied = await copyBlob(gql, { sourceWorkspaceId, targetWorkspaceId, key }, { maxDecodedBytes: input.maxBytes });
+    if (copied.targetKey !== key) {
+      return { key, status: "failed", error: `target stored the blob under a different key (${copied.targetKey})` };
     }
-    return { key, status: "copied", size: downloaded.data.length, contentType: downloaded.contentType };
+    return { key, status: "copied", size: copied.size, contentType: copied.contentType };
   } catch (error: any) {
-    return { key, status: "failed", error: error?.message ?? String(error) };
+    const message = error?.message ?? String(error);
+    if (/ was not found in workspace /.test(message)) return { key, status: "not_found" };
+    return { key, status: "failed", error: message };
   }
 }
