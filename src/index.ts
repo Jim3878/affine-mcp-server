@@ -11,6 +11,7 @@ import { registerHistoryTools } from "./tools/history.js";
 import { registerUserTools } from "./tools/user.js";
 import { registerUserCRUDTools } from "./tools/userCRUD.js";
 import { registerBlobTools } from "./tools/blobStorage.js";
+import { registerMemberTools } from "./tools/members.js";
 import { registerNotificationTools } from "./tools/notifications.js";
 import { AuthSession, parseLoginMode } from "./authSession.js";
 import { registerAuthTools } from "./tools/auth.js";
@@ -233,6 +234,7 @@ async function buildServer() {
   }
   registerBlobTools(server, gql);
   registerNotificationTools(server, gql);
+  registerMemberTools(server, gql, { workspaceId: config.defaultWorkspaceId });
 
   // NineDay: extension tools bypass the canonical manifest (they are not upstream tools), but still go
   // through the profile check, error wrapping and annotations.

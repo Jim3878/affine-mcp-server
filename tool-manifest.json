@@ -65,6 +65,7 @@
     "list_organize_nodes",
     "list_surface_elements",
     "list_tags",
+    "list_workspace_members",
     "list_workspace_tree",
     "list_workspaces",
     "move_block",

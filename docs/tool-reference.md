@@ -25,6 +25,7 @@ or retry an operation; do not infer success from human-readable error text.
 | --- | --- | --- |
 | `list_workspaces` | List all available workspaces | Includes best-effort profile names, avatar references, and direct URLs; set `includeProfile: false` for a faster GraphQL-only response |
 | `get_workspace` | Read workspace details | Includes permissions plus best-effort profile metadata and a direct URL |
+| `list_workspace_members` | List or search workspace members | Returns `id`, `name`, `email`, `role`, `status`; `query` searches name and email; any workspace member may call it |
 | `create_workspace` | Create a workspace with an initial document | Destructive in the sense that it creates new server state |
 | `update_workspace` | Update workspace settings | Requires at least one of `public` or `enableAi`; use carefully in shared workspaces |
 | `delete_workspace` | Permanently delete a workspace | Destructive; `confirmWorkspaceId` must exactly match `id`; unconfirmed outcomes return an MCP error instead of a success receipt |
@@ -223,9 +224,9 @@ Inline page references use `{ "insert": " ", "attributes": { "reference": { "typ
 | Tool | Purpose | Notes |
 | --- | --- | --- |
 | `list_doc_properties` | List workspace custom-property definitions and a document's current values | WebSocket-backed; reads the `db$<workspaceId>$docProperties` / `db$<workspaceId>$docCustomPropertyInfo` sub-docs |
-| `create_custom_property` | Create a workspace-wide custom property definition | Types: `text`, `number`, `checkbox`, `date`. Returns the `propertyId` |
+| `create_custom_property` | Create a workspace-wide custom property definition | Types: `text`, `number`, `checkbox`, `date`, `member`. Returns the `propertyId`. `member` needs the NineDay AFFiNE frontend to render |
 | `delete_custom_property` | Soft-delete a custom property definition by id or name | Destructive; existing values are hidden |
-| `set_doc_property` | Set a document's custom property value by property id or name | Value validated per type (`checkbox` boolean, `number`, `date` `YYYY-MM-DD`, `text`) |
+| `set_doc_property` | Set a document's custom property value by property id or name | Value validated per type (`checkbox` boolean, `number`, `date` `YYYY-MM-DD`, `text`, `member` array of user ids, emails, or unique names) |
 | `clear_doc_property` | Remove a custom property value from a document | |
 | `set_doc_journal` | Set or clear a document's native AFFiNE Journal date | Requires an existing, non-trashed document; accepts a calendar-valid `YYYY-MM-DD` date or `null` to clear |
 
