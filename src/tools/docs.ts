@@ -32,6 +32,7 @@ import {
 import { secureAffineId, secureRandomInt31 } from "../util/random.js";
 import { documentRevision, isDocumentRegistered } from "../util/documentRevision.js";
 import { docPropertiesDocId, ensureDocumentCreator, fetchCurrentUserId, readDocumentCreator } from "../util/docCreator.js";
+import { fetchAllWorkspaceMembers, resolveMemberReferences, type WorkspaceMember } from "./members.js";
 import { copyBlobBetweenWorkspaces, listWorkspaceBlobKeys, rewriteDocReferences, scanDocReferences, summarizeDocContent } from "../util/docCopy.js";
 import { loadBlobUploadConfig } from "./blobStorage.js";
 import {
@@ -496,7 +497,7 @@ type DatabaseIntentPreset = {
   extraColumns: DatabaseIntentColumnSpec[];
   starterRows: DatabaseIntentSeedRow[];
 };
-const DATABASE_COLUMN_TYPE_VALUES = ["title", "rich-text", "select", "multi-select", "number", "checkbox", "link", "date", "relation", "formula"] as const;
+const DATABASE_COLUMN_TYPE_VALUES = ["title", "rich-text", "select", "multi-select", "number", "checkbox", "link", "date", "relation", "formula", "member"] as const;
 /** NineDay: result types of a formula column (drives sorting and filtering in AFFiNE). */
 const FORMULA_RESULT_TYPE_VALUES = ["number", "text", "boolean", "date", "list"] as const;
 
@@ -8900,6 +8901,11 @@ export function registerDocTools(
       }
       case "link":
         return { ...base, value: rawValue == null ? null : String(rawValue) };
+      // NineDay: member cells hold workspace user ids; read_database_cells swaps in names.
+      case "member": {
+        const memberIds = databaseArrayValues(rawValue).map(entry => String(entry)).filter(Boolean);
+        return { ...base, value: memberIds, memberIds };
+      }
       default:
         return {
           ...base,
@@ -8908,6 +8914,44 @@ export function registerDocTools(
             : rawValue ?? null,
         };
     }
+  }
+
+  /** Member cell input already checked against the workspace member list. */
+  class ResolvedMemberIds {
+    constructor(readonly ids: string[], readonly members: WorkspaceMember[]) {}
+  }
+
+  /**
+   * NineDay: replace the values of member-typed columns in a cells map with resolved user ids.
+   * Accepts an array (or comma separated string) of user ids, emails, or unique display names;
+   * unknown or ambiguous references throw before anything is written. The member list is only
+   * fetched when a member column is actually being written.
+   */
+  async function resolveMemberCells(
+    workspaceId: string,
+    cells: Record<string, unknown>,
+    lookup: DatabaseColumnLookup,
+  ): Promise<{ cells: Record<string, unknown>; assigned: Record<string, Array<{ id: string; name: string | null }>> }> {
+    const resolved: Record<string, unknown> = { ...cells };
+    const assigned: Record<string, Array<{ id: string; name: string | null }>> = {};
+    let members: WorkspaceMember[] | undefined;
+    for (const [key, value] of Object.entries(cells)) {
+      const col = findDatabaseColumn(key, lookup);
+      if (col?.type !== "member") continue;
+      members ??= await fetchAllWorkspaceMembers(gql, workspaceId);
+      const references = (Array.isArray(value) ? value.map(String) : String(value ?? "").split(","))
+        .map(reference => reference.trim())
+        .filter(Boolean);
+      let matched: WorkspaceMember[];
+      try {
+        matched = resolveMemberReferences(members, references);
+      } catch (error) {
+        throw new Error(`Column "${col.name}": ${error instanceof Error ? error.message : String(error)}`);
+      }
+      resolved[key] = new ResolvedMemberIds(matched.map(member => member.id), matched);
+      assigned[col.name || col.id] = matched.map(member => ({ id: member.id, name: member.name }));
+    }
+    return { cells: resolved, assigned };
   }
 
   function writeDatabaseCellValue(
@@ -8967,6 +9011,17 @@ export function registerDocTools(
       case "link":
         cellValue.set("value", String(value ?? ""));
         break;
+      // NineDay: member cells store user ids. Callers resolve names/emails first
+      // (resolveMemberCells), so a typo can never be stored as if it were an id.
+      case "member": {
+        if (!(value instanceof ResolvedMemberIds)) {
+          throw new Error(`Column "${col.name}": member cells must be written through update_database_row or add_database_row`);
+        }
+        const memberIds = new Y.Array<string>();
+        memberIds.push(value.ids);
+        cellValue.set("value", memberIds);
+        break;
+      }
       // NineDay: relation cells may live in another doc (two-way mirrors) and are written by
       // the relation session; formula cells are computed by the editor and never stored.
       case "relation":
@@ -9045,10 +9100,11 @@ export function registerDocTools(
     const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
     try {
       const creatorId = await fetchCurrentUserId(gql);
+      const memberCells = await resolveMemberCells(workspaceId, parsed.cells, ctx);
       // NineDay: relation cells are written once the row exists (they may touch other docs).
       const plainCells: Record<string, unknown> = {};
       const relationCells: Array<[DatabaseColumnDef, unknown]> = [];
-      for (const [key, value] of Object.entries(parsed.cells)) {
+      for (const [key, value] of Object.entries(memberCells.cells)) {
         const col = findDatabaseColumn(key, ctx);
         if (col?.type === "relation") relationCells.push([col, value]);
         else plainCells[key] = value;
@@ -9076,6 +9132,7 @@ export function registerDocTools(
         databaseBlockId: parsed.databaseBlockId,
         cellCount: Object.keys(parsed.cells).length,
         linkedDocId: parsed.linkedDocId || null,
+        ...(Object.keys(memberCells.assigned).length ? { members: memberCells.assigned } : {}),
       });
     } finally {
       ctx.socket.disconnect();
@@ -9085,7 +9142,7 @@ export function registerDocTools(
     "add_database_row",
     {
       title: "Add Database Row",
-      description: "Add a row to an AFFiNE database block. Provide cell values mapped by column name or column ID. Title column text is stored on the row paragraph block. Select columns auto-create options by label.",
+      description: "Add a row to an AFFiNE database block. Provide cell values mapped by column name or column ID. Title column text is stored on the row paragraph block. Select columns auto-create options by label. Member columns take an array (or comma separated string) of user ids, emails, or unique display names from list_workspace_members; unknown names are rejected and no notification is sent.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -9174,6 +9231,27 @@ export function registerDocTools(
         : ctx.columnDefs;
       const requestedColumnIds = new Set(requestedColumns.map(col => col.id));
       const session = createRelationSession(workspaceId, parsed.docId, ctx);
+      // NineDay: member cells are returned as names; the list is fetched once, only if needed.
+      let memberNames: Map<string, WorkspaceMember> | null | undefined;
+      const describeMemberCell = async (cell: Record<string, unknown>) => {
+        if (memberNames === undefined) {
+          try {
+            memberNames = new Map((await fetchAllWorkspaceMembers(gql, workspaceId)).map(member => [member.id, member]));
+          } catch {
+            memberNames = null; // ids are still returned
+          }
+        }
+        const ids = (cell.memberIds as string[]) ?? [];
+        return {
+          ...cell,
+          value: ids.map(id => memberNames?.get(id)?.name ?? id),
+          members: ids.map(id => ({
+            id,
+            name: memberNames?.get(id)?.name ?? null,
+            inWorkspace: memberNames ? memberNames.has(id) : null,
+          })),
+        };
+      };
 
       const rows = [];
       for (const rowBlockId of requestedRows) {
@@ -9211,7 +9289,8 @@ export function registerDocTools(
           if (cellEntry === undefined) {
             continue;
           }
-          cells[col.name || col.id] = decodeDatabaseCellValue(col, cellEntry);
+          const decoded = decodeDatabaseCellValue(col, cellEntry);
+          cells[col.name || col.id] = col.type === "member" ? await describeMemberCell(decoded) : decoded;
         }
 
         rows.push({
@@ -9232,7 +9311,7 @@ export function registerDocTools(
     "read_database_cells",
     {
       title: "Read Database Cells",
-      description: "Read row titles and database cell values from an AFFiNE database block. Rich-text titles and cells include both plain values and formatting-preserving deltas. Relation cells list related row titles (value) and row IDs (rowIds). Formula cells are computed by the AFFiNE editor and are not returned; read their expressions with read_database_columns.",
+      description: "Read row titles and database cell values from an AFFiNE database block. Rich-text titles and cells include both plain values and formatting-preserving deltas. Relation cells list related row titles (value) and row IDs (rowIds). Member cells list member names (value), user ids (memberIds), and members ({id, name, inWorkspace}). Formula cells are computed by the AFFiNE editor and are not returned; read their expressions with read_database_columns.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -9320,8 +9399,9 @@ export function registerDocTools(
       const rowCells = ensureDatabaseRowCells(ctx.cellsMap, parsed.rowBlockId);
       const session = createRelationSession(workspaceId, parsed.docId, ctx);
       let titleValue: string | TextDelta[] | null = null;
+      const memberCells = await resolveMemberCells(workspaceId, parsed.cells, ctx);
 
-      for (const [key, value] of Object.entries(parsed.cells)) {
+      for (const [key, value] of Object.entries(memberCells.cells)) {
         const col = findDatabaseColumn(key, ctx);
         if (!col) {
           if (isTitleAliasKey(key)) {
@@ -9353,6 +9433,7 @@ export function registerDocTools(
         updated: true,
         rowBlockId: parsed.rowBlockId,
         cellCount: Object.keys(parsed.cells).length,
+        ...(Object.keys(memberCells.assigned).length ? { members: memberCells.assigned } : {}),
       });
     } finally {
       ctx.socket.disconnect();
@@ -9362,7 +9443,7 @@ export function registerDocTools(
     "update_database_row",
     {
       title: "Update Database Row",
-      description: "Batch update multiple cells on an existing AFFiNE database row. Include `title` in the cells map to update the Kanban row title.",
+      description: "Batch update multiple cells on an existing AFFiNE database row. Include `title` in the cells map to update the Kanban row title. Member columns take an array (or comma separated string) of user ids, emails, or unique display names from list_workspace_members and replace the whole assignment (an empty array clears it); unknown names are rejected and no notification is sent.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
@@ -10091,7 +10172,7 @@ export function registerDocTools(
     "add_database_column",
     {
       title: "Add Database Column",
-      description: "Add a column to an existing AFFiNE database block. Supports title, rich-text, select, multi-select, number, checkbox, link, date, relation, and formula types. A title addition is rejected when the current database snapshot already has a title column. A relation column links rows of another database (relationTarget); twoWay also adds a mirror column to the target database. A formula column takes a Notion-style expression (e.g. prop(\"Price\") * prop(\"Qty\")) whose values AFFiNE computes in the editor.",
+      description: "Add a column to an existing AFFiNE database block. Supports title, rich-text, select, multi-select, number, checkbox, link, date, relation, formula, and member types. A member column holds workspace members (assignees), written by id, email, or name through add_database_row / update_database_row. A title addition is rejected when the current database snapshot already has a title column. A relation column links rows of another database (relationTarget); twoWay also adds a mirror column to the target database. A formula column takes a Notion-style expression (e.g. prop(\"Price\") * prop(\"Qty\")) whose values AFFiNE computes in the editor.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID containing the database"),
