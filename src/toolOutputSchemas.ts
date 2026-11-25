@@ -75,6 +75,7 @@ const OUTPUT_SPECS = {
   cleanup_blobs: fallible(receipt({ status: "string", success: "boolean", workspaceId: "string", blobsReleased: "boolean" }, true)),
   clear_doc_property: spec({ workspaceId: "string", docId: "string", propertyId: "string", cleared: "boolean" }),
   compose_database_from_intent: spec({ workspaceId: "string", docId: "string", intent: "string", title: "string", databaseBlockId: "string", primaryViewId: "nullableString", viewIds: "stringArray", columnIds: "stringArray", rowBlockIds: "stringArray", columns: "unknownArray", views: "unknownArray", warnings: "stringArray", lossy: "boolean", stats: "object" }),
+  copy_docs_to_workspace: fallible(spec({ sourceWorkspaceId: "string", targetWorkspaceId: "string", copiedCount: "number", folderId: "nullableString", docs: "unknownArray", idMap: "object", blobs: "object", unresolvedLinks: "unknownArray", notCopied: "stringArray", warnings: "stringArray" }, true, ["sourceWorkspaceId", "targetWorkspaceId"])),
   create_collection: spec({ id: "string", name: "string", rules: "object", allowList: "stringArray" }),
   create_comment: receipt({ workspaceId: "string", docId: "string", commentId: "string", id: "string", comment: "object" }),
   create_custom_property: spec({ workspaceId: "string", propertyId: "string", name: "string", type: "string", index: "string", created: "boolean" }),
