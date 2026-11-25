@@ -13,6 +13,7 @@ export const ALL_TOOLS = [
   "cleanup_blobs",
   "clear_doc_property",
   "compose_database_from_intent",
+  "copy_blob",
   "create_collection",
   "create_comment",
   "create_custom_property",
@@ -38,6 +39,7 @@ export const ALL_TOOLS = [
   "delete_surface_element",
   "delete_tag",
   "delete_workspace",
+  "download_blob",
   "export_doc_markdown",
   "export_with_fidelity_report",
   "find_doc_by_title",
@@ -235,12 +237,15 @@ const TOOL_GROUPS: Record<ToolName, readonly string[]> = {
   update_table_column_widths: ["docs", "docs.write", "write"],
   update_workspace: ["workspaces", "workspaces.write", "admin", "write"],
   upload_blob: ["blobs", "blobs.write", "write"],
+  copy_blob: ["blobs", "blobs.write", "write"],
+  download_blob: ["blobs", "blobs.read", "read"],
 };
 
 const READ_ONLY_TOOLS = new Set<ToolName>([
   "get_mindmap",
   "analyze_doc_fidelity",
   "current_user",
+  "download_blob",
   "export_doc_markdown",
   "export_with_fidelity_report",
   "find_doc_by_title",

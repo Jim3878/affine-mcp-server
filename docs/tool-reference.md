@@ -346,6 +346,8 @@ Plain strings and legacy `{ text: "..." }` comment objects are converted to Bloc
 | Tool | Purpose | Notes |
 | --- | --- | --- |
 | `upload_blob` | Upload a file or blob to workspace storage | Defaults to `encoding: "utf8"`; pass `encoding: "base64"` explicitly for binary content. The returned opaque key is accepted as image/attachment `sourceId`; it is not an external URL |
+| `download_blob` | Download a blob to a local file on the machine running the server | Saves to `outputPath` (absolute) or `<AFFINE_BLOB_DOWNLOAD_DIR>/<workspaceId>/<key>.<ext>`. Refuses to replace an existing file unless `overwrite: true`. PNG/JPEG/GIF/WebP up to 5 MiB are also returned inline. Size limit follows `AFFINE_BLOB_UPLOAD_MAX_BYTES` |
+| `copy_blob` | Copy blobs from one workspace's storage to another's | Takes `key` or `keys` (at most 50). Bytes are transferred by the server, not through the conversation. Each result has `sourceKey`, `targetKey`, and `keyChanged`; the target key normally equals the source key, so image/attachment `sourceId` values stay valid. One failing key does not stop the others |
 | `delete_blob` | Delete a blob from workspace storage | Permanent deletion requires `confirmKey` to exactly match `key`; false, exception, and unconfirmed outcomes return stable MCP errors |
 | `cleanup_blobs` | Permanently remove deleted blobs | `confirmWorkspaceId` must exactly match `workspaceId`; false, exception, and unconfirmed outcomes return stable MCP errors |
 

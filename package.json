@@ -57,6 +57,7 @@
     "test:tool-filtering": "node tests/test-tool-filtering.mjs",
     "test:mutation-ack": "node tests/test-destructive-mutation-ack.mjs",
     "test:pr-route-policy": "node tests/test-pr-route-policy.mjs",
+    "test:blob-copy-contract": "node tests/test-blob-copy-contract.mjs",
     "test:blob-upload-contract": "node tests/test-blob-upload-contract.mjs",
     "test:secure-random": "node tests/test-secure-random.mjs",
     "test:oauth-service-policy": "node tests/test-oauth-service-policy.mjs",
