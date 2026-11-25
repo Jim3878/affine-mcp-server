@@ -16,6 +16,7 @@
     "clear_doc_property",
     "compose_database_from_intent",
     "copy_blob",
+    "copy_docs_to_workspace",
     "create_collection",
     "create_comment",
     "create_custom_property",

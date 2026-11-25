@@ -31,7 +31,9 @@ import {
 } from "../util/inputSchemas.js";
 import { secureAffineId, secureRandomInt31 } from "../util/random.js";
 import { documentRevision, isDocumentRegistered } from "../util/documentRevision.js";
-import { ensureDocumentCreator, fetchCurrentUserId, readDocumentCreator } from "../util/docCreator.js";
+import { docPropertiesDocId, ensureDocumentCreator, fetchCurrentUserId, readDocumentCreator } from "../util/docCreator.js";
+import { copyBlobBetweenWorkspaces, listWorkspaceBlobKeys, rewriteDocReferences, scanDocReferences, summarizeDocContent } from "../util/docCopy.js";
+import { loadBlobUploadConfig } from "./blobStorage.js";
 import {
   wsUrlFromGraphQLEndpoint,
   connectWorkspaceSocket,
@@ -8069,6 +8071,315 @@ export function registerDocTools(
       },
     },
     instantiateTemplateNativeHandler as any
+  );
+
+  // ── NineDay: copy docs into another workspace ──
+  // Each doc's whole Yjs state is pushed under a new doc id, so text, databases and the
+  // edgeless surface (shapes, connectors, card positions) are carried over untouched. Links
+  // between docs of the same call are rewritten to the new ids, and blobs are copied first.
+  const COPY_DOCS_MAX = 50;
+  const COPY_DOCS_NOT_COPIED = [
+    "tags",
+    "folder structure",
+    "comments",
+    "page history",
+    "custom doc properties",
+    "favorites",
+    "doc icons",
+  ];
+
+  async function readPrimaryModes(socket: any, workspaceId: string, docIds: string[]): Promise<Map<string, string>> {
+    const modes = new Map<string, string>();
+    const snapshot = await loadDoc(socket, workspaceId, docPropertiesDocId(workspaceId));
+    if (typeof snapshot.missing !== "string") return modes;
+    const propertiesDoc = new Y.Doc();
+    try {
+      Y.applyUpdate(propertiesDoc, Buffer.from(snapshot.missing, "base64"));
+      for (const docId of docIds) {
+        if (!propertiesDoc.share.has(docId)) continue;
+        const mode = propertiesDoc.getMap(docId).get("primaryMode");
+        if (typeof mode === "string" && mode) modes.set(docId, mode);
+      }
+    } finally {
+      propertiesDoc.destroy();
+    }
+    return modes;
+  }
+
+  async function writePrimaryModes(socket: any, workspaceId: string, modes: Map<string, string>): Promise<void> {
+    if (modes.size === 0) return;
+    const propsDocId = docPropertiesDocId(workspaceId);
+    const snapshot = await loadDoc(socket, workspaceId, propsDocId);
+    const propertiesDoc = new Y.Doc();
+    try {
+      if (typeof snapshot.missing === "string") {
+        Y.applyUpdate(propertiesDoc, Buffer.from(snapshot.missing, "base64"));
+      }
+      const previousState = Y.encodeStateVector(propertiesDoc);
+      for (const [docId, mode] of modes) {
+        const record = propertiesDoc.getMap(docId);
+        if (record.get("id") !== docId) record.set("id", docId);
+        record.set("primaryMode", mode);
+      }
+      const update = Y.encodeStateAsUpdate(propertiesDoc, previousState);
+      await pushDocUpdate(socket, workspaceId, propsDocId, Buffer.from(update).toString("base64"));
+    } finally {
+      propertiesDoc.destroy();
+    }
+  }
+
+  const copyDocsToWorkspaceHandler = async (parsed: {
+    sourceWorkspaceId?: string;
+    targetWorkspaceId: string;
+    docIds: string[];
+    folderId?: string;
+    copyBlobs?: boolean;
+  }) => {
+    const sourceWorkspaceId = (parsed.sourceWorkspaceId || defaults.workspaceId || "").trim();
+    const targetWorkspaceId = (parsed.targetWorkspaceId || "").trim();
+    if (!sourceWorkspaceId) {
+      throw new Error("sourceWorkspaceId is required. Provide it as a parameter or set AFFINE_WORKSPACE_ID.");
+    }
+    if (!targetWorkspaceId) throw new Error("targetWorkspaceId is required.");
+    const docIds = Array.from(new Set(parsed.docIds.map(id => id.trim()).filter(Boolean)));
+    if (docIds.length === 0) throw new Error("docIds must name at least one doc.");
+    if (docIds.length > COPY_DOCS_MAX) {
+      throw new Error(`At most ${COPY_DOCS_MAX} docs can be copied per call; received ${docIds.length}.`);
+    }
+    const copyBlobs = parsed.copyBlobs !== false;
+    const sameWorkspace = sourceWorkspaceId === targetWorkspaceId;
+
+    const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+    const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+    const baseUrl = affineBaseUrl(endpoint, gql.baseUrl);
+
+    type PendingCopy = {
+      sourceDocId: string;
+      docId: string;
+      title: string;
+      doc: Y.Doc;
+      primaryMode: string | null;
+      rewrittenLinks: number;
+      unresolvedLinkedDocIds: string[];
+      blobKeys: string[];
+      blockCount: number;
+      surfaceElementCount: number;
+    };
+    const pending: PendingCopy[] = [];
+    const idMap = new Map<string, string>();
+    const sourceBlobKeys = new Set<string>();
+    const candidateBlobKeys = new Set<string>();
+
+    // 1. Read everything from the source before anything is written.
+    const sourceSocket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+    try {
+      await joinWorkspace(sourceSocket, sourceWorkspaceId);
+      const rootSnapshot = await loadDoc(sourceSocket, sourceWorkspaceId, sourceWorkspaceId);
+      if (!rootSnapshot.missing) {
+        throw new Error(`Workspace root document not found for workspace ${sourceWorkspaceId}`);
+      }
+      const rootDoc = new Y.Doc();
+      Y.applyUpdate(rootDoc, Buffer.from(rootSnapshot.missing, "base64"));
+      const pageById = new Map(getWorkspacePageEntries(rootDoc.getMap("meta")).map(page => [page.id, page]));
+      const missingDocs = docIds.filter(id => !pageById.has(id));
+      if (missingDocs.length > 0) {
+        throw new Error(`Not found in workspace ${sourceWorkspaceId}: ${missingDocs.join(", ")}`);
+      }
+      const trashed = docIds.filter(id => pageById.get(id)?.inTrash === true);
+      if (trashed.length > 0) {
+        throw new Error(`These docs are in the trash and were not copied: ${trashed.join(", ")}. Restore them first or leave them out.`);
+      }
+      const primaryModes = await readPrimaryModes(sourceSocket, sourceWorkspaceId, docIds);
+
+      for (const sourceDocId of docIds) idMap.set(sourceDocId, generateId());
+      for (const sourceDocId of docIds) {
+        const snapshot = await loadDoc(sourceSocket, sourceWorkspaceId, sourceDocId);
+        if (!snapshot.missing) throw new Error(`Doc ${sourceDocId} has no content in workspace ${sourceWorkspaceId}.`);
+        const doc = new Y.Doc();
+        Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
+        const blocks = doc.getMap("blocks") as Y.Map<any>;
+        const pageBlockId = findBlockIdByFlavour(blocks, "affine:page");
+        const pageBlock = pageBlockId ? findBlockById(blocks, pageBlockId) : null;
+        const title = (pageBlock ? asText(pageBlock.get("prop:title")) : "")
+          || (pageById.get(sourceDocId)?.title ?? "")
+          || "Untitled";
+
+        const scan = scanDocReferences(doc);
+        const rewrittenLinks = rewriteDocReferences(doc, idMap);
+        for (const key of scan.sourceBlobKeys) sourceBlobKeys.add(key);
+        for (const key of scan.candidateBlobKeys) candidateBlobKeys.add(key);
+        pending.push({
+          sourceDocId,
+          docId: idMap.get(sourceDocId)!,
+          title,
+          doc,
+          primaryMode: primaryModes.get(sourceDocId) ?? null,
+          rewrittenLinks,
+          unresolvedLinkedDocIds: Array.from(scan.linkedDocIds).filter(id => !idMap.has(id)),
+          blobKeys: Array.from(scan.sourceBlobKeys),
+          ...summarizeDocContent(doc),
+        });
+      }
+    } finally {
+      sourceSocket.disconnect();
+    }
+    for (const key of sourceBlobKeys) candidateBlobKeys.delete(key);
+
+    // 2. Blobs first, so a copied doc never shows a broken image.
+    const warnings: string[] = [];
+    const blobSummary = {
+      referenced: sourceBlobKeys.size,
+      copied: 0,
+      alreadyPresent: 0,
+      bytesCopied: 0,
+      skipped: false as boolean,
+      missing: [] as string[],
+      failed: [] as Array<{ key: string; error: string }>,
+    };
+    if (sameWorkspace || !copyBlobs) {
+      blobSummary.skipped = true;
+      if (!sameWorkspace && sourceBlobKeys.size > 0) {
+        warnings.push(`copyBlobs is false: ${sourceBlobKeys.size} image/attachment blob(s) were not copied and will not load in the target workspace.`);
+      }
+    } else {
+      const { maxDecodedBytes } = loadBlobUploadConfig();
+      const targetKeys = await listWorkspaceBlobKeys(gql, targetWorkspaceId);
+      const copyOne = async (key: string, required: boolean) => {
+        const outcome = await copyBlobBetweenWorkspaces(gql, {
+          sourceWorkspaceId,
+          targetWorkspaceId,
+          key,
+          maxBytes: maxDecodedBytes,
+          targetKeys,
+        });
+        if (outcome.status === "copied") {
+          blobSummary.copied += 1;
+          blobSummary.bytesCopied += outcome.size;
+        } else if (outcome.status === "already_present") {
+          blobSummary.alreadyPresent += 1;
+        } else if (outcome.status === "not_found") {
+          // A look-alike string that is not a blob in the source is simply not a blob.
+          if (required) blobSummary.missing.push(key);
+        } else {
+          blobSummary.failed.push({ key, error: outcome.error });
+        }
+      };
+      for (const key of sourceBlobKeys) await copyOne(key, true);
+      for (const key of candidateBlobKeys) await copyOne(key, false);
+      if (blobSummary.missing.length > 0) {
+        warnings.push(`${blobSummary.missing.length} blob(s) referenced by the docs no longer exist in the source workspace.`);
+      }
+      if (blobSummary.failed.length > 0) {
+        warnings.push(`${blobSummary.failed.length} blob(s) could not be copied; the docs were still copied and reference them.`);
+      }
+    }
+
+    // 3. Create the docs in the target workspace.
+    const created: Array<Record<string, unknown>> = [];
+    const unresolvedLinks: Array<{ sourceDocId: string; docId: string; linkedDocId: string }> = [];
+    const targetSocket = await connectForDocumentCreation(wsUrl, cookie, bearer);
+    try {
+      await joinForDocumentCreation(targetSocket, targetWorkspaceId);
+      const creatorId = await fetchCurrentUserId(gql);
+      for (const item of pending) {
+        try {
+          await commitNewDocument(targetSocket, targetWorkspaceId, item.docId, item.title, item.doc, creatorId);
+        } catch (error: any) {
+          const createdIds = new Set(created.map(entry => entry.sourceDocId));
+          return toolError(error, {
+            code: "doc_copy_partial",
+            retryable: false,
+            data: {
+              kind: "doc.copy_to_workspace",
+              status: created.length > 0 ? "partial" : "failed",
+              sourceWorkspaceId,
+              targetWorkspaceId,
+              failedSourceDocId: item.sourceDocId,
+              failedDocId: item.docId,
+              docs: created,
+              notCopiedSourceDocIds: docIds.filter(id => !createdIds.has(id)),
+              recoveryGuidance: "Docs listed in `docs` already exist in the target workspace and may link to docs that were not created. Do not simply retry the whole call: it would create second copies.",
+            },
+          });
+        }
+        for (const linkedDocId of item.unresolvedLinkedDocIds) {
+          unresolvedLinks.push({ sourceDocId: item.sourceDocId, docId: item.docId, linkedDocId });
+        }
+        created.push({
+          sourceDocId: item.sourceDocId,
+          docId: item.docId,
+          title: item.title,
+          url: `${baseUrl}/workspace/${targetWorkspaceId}/${item.docId}`,
+          primaryMode: item.primaryMode,
+          blockCount: item.blockCount,
+          surfaceElementCount: item.surfaceElementCount,
+          rewrittenLinks: item.rewrittenLinks,
+          unresolvedLinkedDocIds: item.unresolvedLinkedDocIds,
+          blobKeys: item.blobKeys,
+          folderLinked: false,
+        });
+      }
+
+      const modes = new Map<string, string>();
+      for (const item of pending) {
+        if (item.primaryMode) modes.set(item.docId, item.primaryMode);
+      }
+      try {
+        await writePrimaryModes(targetSocket, targetWorkspaceId, modes);
+      } catch (error: any) {
+        warnings.push(`Docs copied, but their default page/edgeless mode could not be set: ${error?.message ?? "unknown error"}`);
+      }
+    } finally {
+      targetSocket.disconnect();
+      for (const item of pending) item.doc.destroy();
+    }
+
+    // 4. Optional placement in one existing folder of the target workspace.
+    let folderId: string | null = null;
+    if (parsed.folderId?.trim()) {
+      for (const entry of created) {
+        const placement = await finalizeDocFolderPlacement({
+          workspaceId: targetWorkspaceId,
+          docId: entry.docId as string,
+          folderId: parsed.folderId,
+        });
+        entry.folderLinked = placement.folderLinked;
+        if (placement.folderLinked) folderId = placement.folderId;
+        warnings.push(...placement.warnings);
+      }
+    }
+
+    if (unresolvedLinks.length > 0 && !sameWorkspace) {
+      warnings.push(`${unresolvedLinks.length} link(s) point to docs outside this call and still carry the source doc id; they will not resolve in the target workspace unless those docs are copied too.`);
+    }
+
+    return text({
+      sourceWorkspaceId,
+      targetWorkspaceId,
+      copiedCount: created.length,
+      folderId,
+      docs: created,
+      idMap: Object.fromEntries(idMap),
+      blobs: blobSummary,
+      unresolvedLinks,
+      notCopied: COPY_DOCS_NOT_COPIED,
+      warnings,
+    });
+  };
+  server.registerTool(
+    "copy_docs_to_workspace",
+    {
+      title: "Copy Docs To Workspace",
+      description: "Copy one or more docs into another workspace (or duplicate them in the same one) with full fidelity: text, databases, and the edgeless canvas (shapes, connectors, embedded card positions) are carried over as-is, images and attachments are copied to the target workspace, and links between the docs passed in the same call (embed cards, inline LinkedPage references, relation column targets) are rewritten to the new doc ids. Pass every doc that links to another in ONE call so the links stay intact; links to docs outside the call are left unchanged and listed in unresolvedLinks (across workspaces they will not resolve). The source docs are never modified. Tags, folders, comments, history, custom properties and icons are not copied.",
+      inputSchema: {
+        sourceWorkspaceId: WorkspaceId.optional().describe("Workspace to copy from. Defaults to AFFINE_WORKSPACE_ID."),
+        targetWorkspaceId: z.string().min(1).describe("Workspace to copy into. May equal the source workspace to duplicate docs."),
+        docIds: z.array(z.string().min(1)).min(1).max(COPY_DOCS_MAX).describe(`Docs to copy, at most ${COPY_DOCS_MAX} per call.`),
+        folderId: z.string().optional().describe("Optional existing folder in the TARGET workspace to place every copy in. Use list_organize_nodes to find folder IDs."),
+        copyBlobs: z.boolean().optional().describe("If true (default), copy the images and attachments the docs use into the target workspace."),
+      },
+    },
+    copyDocsToWorkspaceHandler as any
   );
 
   // ── helpers for database select columns ──
