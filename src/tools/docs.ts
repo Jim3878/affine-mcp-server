@@ -71,6 +71,7 @@ import {
   sortByFractionalIndex,
   stackRelativeTo,
 } from "../edgeless/layout.js";
+import { collectCanvasEmbedDocCards } from "../edgeless/embedDocCards.js";
 
 export type DocumentMoveToolContext = {
   workspaceId: string;
@@ -10858,10 +10859,21 @@ export function registerDocTools(
           surfaceBlockId: null,
           count: 0,
           elements: [],
+          embedBlocks: [],
         });
       }
       Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
       const blocks = doc.getMap("blocks") as Y.Map<any>;
+      // Doc cards (embed-linked-doc / embed-synced-doc) are blocks under the
+      // surface, not surface elements, so they are reported separately: the
+      // *_surface_element mutation tools cannot address them.
+      const embedBlocks = params.type
+        ? []
+        : sortByFractionalIndex(
+            collectCanvasEmbedDocCards(blocks).filter(
+              card => !params.elementId || card.id === params.elementId
+            )
+          );
       const ctx = getSurfaceElementsValueMap(blocks, { create: false });
       if (!ctx) {
         return text({
@@ -10870,6 +10882,7 @@ export function registerDocTools(
           surfaceBlockId: null,
           count: 0,
           elements: [],
+          embedBlocks,
         });
       }
       const elements: Record<string, any>[] = [];
@@ -10888,6 +10901,7 @@ export function registerDocTools(
         surfaceBlockId: ctx.surfaceId,
         count: sorted.length,
         elements: sorted,
+        embedBlocks,
       });
     } finally {
       socket.disconnect();
@@ -12026,6 +12040,8 @@ export function registerDocTools(
         }
         edgelessBlocks.push(entry);
       }
+      // Doc cards placed on the canvas (embed-linked-doc / embed-synced-doc).
+      edgelessBlocks.push(...collectCanvasEmbedDocCards(blocks));
 
       const ctx = getSurfaceElementsValueMap(blocks, { create: false });
       const surfaceElements: Record<string, any>[] = [];
@@ -12170,7 +12186,7 @@ export function registerDocTools(
     {
       title: "List Surface Elements",
       description:
-        "List all shape/connector/text/group elements on the AFFiNE edgeless canvas surface. Returns raw xywh strings plus parsed {x,y,width,height} bounds, with Y.Text fields serialized to plain strings. Optional filters by element type or id.",
+        "List all shape/connector/text/group elements on the AFFiNE edgeless canvas surface. Returns raw xywh strings plus parsed {x,y,width,height} bounds, with Y.Text fields serialized to plain strings. Optional filters by element type or id. Doc cards on the canvas (affine:embed-linked-doc / affine:embed-synced-doc) are blocks, not elements: they come back separately in `embedBlocks` with xywh, bounds, index, pageId, style, scale, rotate, caption, titleFontSize, preFoldHeight (empty when `type` is set; `elementId` also matches a card's block id).",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),
@@ -12376,7 +12392,7 @@ export function registerDocTools(
     {
       title: "Get Edgeless Canvas",
       description:
-        "Read the full edgeless canvas: all edgeless-positioned blocks (notes, frames, edgeless-text) with their xywh, plus all surface elements (shapes, connectors, text, groups). Includes aggregate bounding box and per-type element counts. Use this when you need to understand canvas layout end-to-end before placing new elements.",
+        "Read the full edgeless canvas: all edgeless-positioned blocks (notes, frames, edgeless-text, and doc cards affine:embed-linked-doc / affine:embed-synced-doc with pageId, style, scale, titleFontSize) with their xywh, plus all surface elements (shapes, connectors, text, groups). Includes aggregate bounding box and per-type element counts. Use this when you need to understand canvas layout end-to-end before placing new elements.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),

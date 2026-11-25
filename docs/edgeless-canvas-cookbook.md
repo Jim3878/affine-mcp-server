@@ -217,7 +217,7 @@ file when the manual run is complete.
 | `append_block(type="frame", childElementIds)` | Create a frame that owns surface elements and auto-sizes to contain them. |
 | `update_frame_children` | Replace a frame's contents wholesale. Default resizes to fit; `resizeToFit: false` preserves the current box. |
 | `append_block(type="note" / "frame" / "edgeless_text")` | Edgeless blocks. Bare calls auto-stack below existing blocks; pass `x`/`y` or `stackAfter` to override. |
-| `get_edgeless_canvas` | Read the full canvas: edgeless blocks + surface elements with parsed bounds, aggregate bounding box, and per-type counts. Frame entries now include `childElementIds`. |
+| `get_edgeless_canvas` | Read the full canvas: edgeless blocks + surface elements with parsed bounds, aggregate bounding box, and per-type counts. Frame entries now include `childElementIds`. Doc cards (`affine:embed-linked-doc` / `affine:embed-synced-doc`) appear in `edgelessBlocks` with `pageId`, `style`, `scale`, `titleFontSize`. |
 
 ## BlockSuite alignment notes
 

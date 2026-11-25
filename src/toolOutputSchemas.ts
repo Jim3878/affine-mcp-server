@@ -121,7 +121,7 @@ const OUTPUT_SPECS = {
   list_histories: spec({ items: "unknownArray" }),
   list_notifications: fallible(spec({ kind: "string", items: "unknownArray", error: "string" }, true, ["kind"])),
   list_organize_nodes: spec({ workspaceId: "string", storageDocId: "string", nodes: "unknownArray" }),
-  list_surface_elements: spec({ docId: "string", exists: "boolean", surfaceBlockId: "nullableString", count: "number", elements: "unknownArray" }),
+  list_surface_elements: spec({ docId: "string", exists: "boolean", surfaceBlockId: "nullableString", count: "number", elements: "unknownArray", embedBlocks: "unknownArray" }),
   list_tags: spec({ workspaceId: "string", totalTags: "number", tags: "unknownArray" }),
   list_workspace_tree: spec({ workspaceId: "string", totalDocs: "number", rootCount: "number", tree: "unknownArray" }, true),
   list_workspaces: fallible(spec({ items: "workspaceArray", error: "string" }, true, ["items"])),
