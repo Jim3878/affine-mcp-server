@@ -225,26 +225,50 @@ async function withTimeout<T>(timeoutMs: number, run: (signal: AbortSignal) => P
 }
 
 /**
- * Copy one blob between workspaces: skip it when the target already serves that key, otherwise
+ * Keys of the blobs a workspace already stores, or null when the listing is unavailable.
+ * Presence is read from this listing and never by requesting the blob URL: a CDN in front of
+ * AFFiNE caches a 404 for keys that end in a file extension, which would hide the blob for a
+ * few minutes right after it is uploaded.
+ */
+export async function listWorkspaceBlobKeys(gql: GraphQLClient, workspaceId: string): Promise<Set<string> | null> {
+  try {
+    const data = await gql.request<{ workspace?: { blobs?: Array<{ key?: unknown }> } }>(
+      "query CopyDocsListBlobs($id: String!) { workspace(id: $id) { blobs { key } } }",
+      { id: workspaceId },
+    );
+    const blobs = data?.workspace?.blobs;
+    if (!Array.isArray(blobs)) return null;
+    return new Set(blobs.map(blob => blob?.key).filter((key): key is string => typeof key === "string"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Copy one blob between workspaces: skip it when the target already stores that key, otherwise
  * download it from the source and upload it with setBlob. Never throws; the outcome says what
- * happened. Blob keys are content hashes, so the key is the same on both sides.
+ * happened. setBlob stores a blob under the uploaded filename, so uploading with the key as the
+ * filename keeps the key identical on both sides.
  */
 export async function copyBlobBetweenWorkspaces(
   gql: GraphQLClient,
-  input: { sourceWorkspaceId: string; targetWorkspaceId: string; key: string; maxBytes: number; timeoutMs?: number },
+  input: {
+    sourceWorkspaceId: string;
+    targetWorkspaceId: string;
+    key: string;
+    maxBytes: number;
+    /** Keys already in the target (from listWorkspaceBlobKeys); null uploads unconditionally. */
+    targetKeys?: ReadonlySet<string> | null;
+    timeoutMs?: number;
+  },
 ): Promise<BlobCopyOutcome> {
   const { sourceWorkspaceId, targetWorkspaceId, key, maxBytes } = input;
   const timeoutMs = input.timeoutMs ?? DEFAULT_BLOB_TIMEOUT_MS;
   try {
+    if (input.targetKeys?.has(key)) return { key, status: "already_present" };
     const { endpoint, headers } = await gql.getConnectionAuth();
     const baseUrl = gql.baseUrl;
     const auth = authHeaders(headers);
-
-    const present = await withTimeout(timeoutMs, async signal => {
-      const response = await fetch(blobUrl(baseUrl, targetWorkspaceId, key), { method: "HEAD", headers: auth, signal: signal as any });
-      return response.ok;
-    }).catch(() => false);
-    if (present) return { key, status: "already_present" };
 
     const downloaded = await withTimeout(timeoutMs, async signal => {
       const response = await fetch(blobUrl(baseUrl, sourceWorkspaceId, key), { headers: auth, signal: signal as any });

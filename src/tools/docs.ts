@@ -32,7 +32,7 @@ import {
 import { secureAffineId, secureRandomInt31 } from "../util/random.js";
 import { documentRevision, isDocumentRegistered } from "../util/documentRevision.js";
 import { docPropertiesDocId, ensureDocumentCreator, fetchCurrentUserId, readDocumentCreator } from "../util/docCreator.js";
-import { copyBlobBetweenWorkspaces, rewriteDocReferences, scanDocReferences, summarizeDocContent } from "../util/docCopy.js";
+import { copyBlobBetweenWorkspaces, listWorkspaceBlobKeys, rewriteDocReferences, scanDocReferences, summarizeDocContent } from "../util/docCopy.js";
 import { loadBlobUploadConfig } from "./blobStorage.js";
 import {
   wsUrlFromGraphQLEndpoint,
@@ -8206,12 +8206,14 @@ export function registerDocTools(
       }
     } else {
       const { maxDecodedBytes } = loadBlobUploadConfig();
+      const targetKeys = await listWorkspaceBlobKeys(gql, targetWorkspaceId);
       const copyOne = async (key: string, required: boolean) => {
         const outcome = await copyBlobBetweenWorkspaces(gql, {
           sourceWorkspaceId,
           targetWorkspaceId,
           key,
           maxBytes: maxDecodedBytes,
+          targetKeys,
         });
         if (outcome.status === "copied") {
           blobSummary.copied += 1;
