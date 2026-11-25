@@ -4249,6 +4249,35 @@ export function registerDocTools(
     };
   }
 
+  /**
+   * Drop the empty paragraph createDocSkeleton seeds once real content sits beside it.
+   * Only the note's first child qualifies, and only while it is still an untouched
+   * empty text paragraph, so a doc that ends up with no other content keeps it.
+   */
+  function removeSeedParagraph(blocks: Y.Map<any>, insertedBlockIds: string[]): boolean {
+    if (insertedBlockIds.length === 0) return false;
+    const noteId = findBlockIdByFlavour(blocks, "affine:note");
+    const note = noteId ? findBlockById(blocks, noteId) : null;
+    const noteChildren = note?.get("sys:children");
+    if (!(noteChildren instanceof Y.Array)) return false;
+    const childIds = childIdsFrom(noteChildren);
+    const seedId = childIds[0];
+    if (!seedId || childIds.length < 2 || insertedBlockIds.includes(seedId)) return false;
+    const seed = findBlockById(blocks, seedId);
+    if (
+      !seed ||
+      seed.get("sys:flavour") !== "affine:paragraph" ||
+      seed.get("prop:type") !== "text" ||
+      asText(seed.get("prop:text")).length > 0 ||
+      childIdsFrom(seed.get("sys:children")).length > 0
+    ) {
+      return false;
+    }
+    noteChildren.delete(0, 1);
+    blocks.delete(seedId);
+    return true;
+  }
+
   function applyMarkdownOperationsToDoc(doc: Y.Doc, parsed: {
     workspaceId: string;
     docId: string;
@@ -4256,6 +4285,7 @@ export function registerDocTools(
     strict?: boolean;
     placement?: AppendPlacement;
     replaceExisting?: boolean;
+    removeSeedParagraph?: boolean;
   }, databaseRows: Y.Map<any>[]) {
     const strict = parsed.strict !== false;
     const replaceExisting = parsed.replaceExisting === true;
@@ -4342,6 +4372,9 @@ export function registerDocTools(
         skippedCount += 1;
       }
     }
+    if (parsed.removeSeedParagraph) {
+      removeSeedParagraph(blocks, blockIds);
+    }
     return {
       appendedCount: blockIds.length,
       skippedCount,
@@ -4358,6 +4391,7 @@ export function registerDocTools(
     strict?: boolean;
     placement?: AppendPlacement;
     replaceExisting?: boolean;
+    removeSeedParagraph?: boolean;
   }): Promise<{
     appendedCount: number;
     skippedCount: number;
@@ -5114,6 +5148,7 @@ export function registerDocTools(
         workspaceId,
         docId
       );
+      removeSeedParagraph(docShell.blocks, blockIds);
 
       await commitNewDocument(socket, workspaceId, docId, title, docShell.doc, creatorId);
 
@@ -7154,6 +7189,7 @@ export function registerDocTools(
           docId: created.docId,
           operations,
           strict: parsed.strict,
+          removeSeedParagraph: true,
         });
       } catch (error) {
         throw documentCreationMaterializationError(
