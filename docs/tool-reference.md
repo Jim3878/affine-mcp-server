@@ -253,16 +253,16 @@ Custom properties use AFFiNE's workspace-scoped tables. To recover values writte
 | Tool | Purpose | Notes |
 | --- | --- | --- |
 | `compose_database_from_intent` | Create or enrich a database block from a high-level schema intent | Useful for project boards and structured tables |
-| `add_database_column` | Add a column to a database block | Supports `title`, `rich-text`, `select`, `multi-select`, `number`, `checkbox`, `link`, `date`, `relation` (`relationTarget`, `twoWay`) and `formula` (`expression`, `resultType`); rejects a title addition when the current snapshot already contains one |
+| `add_database_column` | Add a column to a database block | Supports `title`, `rich-text`, `select`, `multi-select`, `number`, `checkbox`, `link`, `date`, `relation` (`relationTarget`, `twoWay`), `formula` (`expression`, `resultType`) and `member` (workspace members, AFFiNE's built-in Member column); rejects a title addition when the current snapshot already contains one |
 | `update_database_column` | Rename, resize, or change the type of a column | Converts cells where possible and reports cleared ones; also sets a relation's target or two-way mirror and a formula's expression |
 | `update_select_options` | Add, rename, recolor, or remove select / multi-select options | Removed options are also removed from cells |
 | `reorder_database_columns` | NineDay: change the column order of a database's views | Listed columns move to the front in the given order, the rest keep their order; every view unless `view` is given; returns each view's order before and after |
 | `delete_database_column` | Delete a column with its cells and view entries | Deletes a two-way relation's mirror column too; marked destructive but kept in the `authoring` profile |
-| `add_database_row` | Add a row to a database block | Rich-text and title values accept strings or delta arrays |
+| `add_database_row` | Add a row to a database block | Rich-text and title values accept strings or delta arrays; member columns accept user ids, emails, or unique names |
 | `delete_database_row` | Delete a row by row block id | Destructive |
 | `read_database_columns` | Read schema metadata, types, options, and view mappings | Useful before edits |
-| `read_database_cells` | Read row titles and decoded cell values | Rich-text titles and cells include plain values and formatting-preserving deltas |
-| `update_database_row` | Update multiple cells on a row at once | Rich-text deltas are preserved; `createOption` defaults to `true` |
+| `read_database_cells` | Read row titles and decoded cell values | Rich-text titles and cells include plain values and formatting-preserving deltas; member cells return names plus `memberIds` |
+| `update_database_row` | Update multiple cells on a row at once | Rich-text deltas are preserved; `createOption` defaults to `true`; a member column's value replaces the whole assignment and unknown members are rejected |
 
 New rows created by `add_database_row` and `compose_database_from_intent` record the
 authenticated AFFiNE account and creation time in native block metadata. Paragraphs
