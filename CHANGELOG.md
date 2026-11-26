@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- NineDay: `copy_docs_to_workspace` copies docs to another workspace, including edgeless content and images, and rewrites links between the copied docs to the new ids.
+- NineDay: `download_blob` and `copy_blob` download a blob or copy one between workspaces.
+- NineDay: `list_workspace_members`, the `member` custom doc property type, and `member` database columns that accept ids, emails or names.
+- NineDay: `get_edgeless_canvas` and `list_surface_elements` return the doc cards on the canvas (`affine:embed-linked-doc`, `affine:embed-synced-doc`) with `xywh`, `pageId`, `style`, `scale` and `titleFontSize`.
+
+### Fixed
+- NineDay: `create_doc_from_markdown` and `create_semantic_page` no longer leave an empty paragraph at the top of the doc.
+- NineDay: `render_doc_screenshot` frames the whole canvas correctly when no `targetIds` or `region` is given.
+
 ### Changed
 - NineDay: the `authoring` profile now exposes `create_folder`, `add_organize_link`, `move_organize_node`, and `rename_folder`, so agents can create sidebar folders and subfolders and file docs into them. `delete_folder`, `delete_organize_link`, `create_workspace_blueprint`, and `update_folder_icon` stay excluded.
 - `rename_folder` returns `previousName`; `move_organize_node` returns `previousParentId` and `previousIndex`, so either change can be undone.
